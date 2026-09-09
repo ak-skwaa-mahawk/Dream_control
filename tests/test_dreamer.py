@@ -3,7 +3,7 @@ import json
 import unittest
 from pathlib import Path
 from core.dream_contract import HarnessSpec, ParamSpec
-from core.dreamer import generate_experiment
+from core.dreamer import generate_experiment, Dreamer, MockInferenceBackend, RemoteHttpBackend
 from core.experiment_validator import ParameterValidationError
 
 class TestDreamer(unittest.TestCase):
@@ -69,6 +69,45 @@ Hope this helps!"""
         exp = generate_experiment(self.seed, self.catalog, mock_llm)
         self.assertEqual(exp.dream_id, "dream_fenced")
         self.assertEqual(exp.parameters["concurrency"], 16)
+
+
+    def test_dreamer_with_custom_mock_inference_backend(self):
+        backend = MockInferenceBackend(
+            responder=lambda prompt, schema: {"concurrency": 8, "timeout_s": 0.5}
+        )
+        dreamer = Dreamer(self.catalog, backend=backend)
+        exp = dreamer.dream("fuzz_gate_buffer", dream_id="d_custom")
+        self.assertEqual(exp.parameters["concurrency"], 8)
+        self.assertAlmostEqual(exp.parameters["timeout_s"], 0.5)
+
+    def test_remote_http_backend_success(self):
+        from unittest.mock import MagicMock, patch
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.read.return_value = json.dumps({
+            "choices": [{"message": {"content": """```json
+{"concurrency": 4, "timeout_s": 0.2}
+```"""}}]
+        }).encode("utf-8")
+        mock_response.__enter__.return_value = mock_response
+
+        with patch("urllib.request.urlopen", return_value=mock_response):
+            backend = RemoteHttpBackend(endpoint_url="http://localhost:8000/v1/chat", api_key="secret")
+            dreamer = Dreamer(self.catalog, backend=backend)
+            exp = dreamer.dream("fuzz_gate_buffer", dream_id="d_remote")
+            self.assertEqual(exp.parameters["concurrency"], 4)
+            self.assertAlmostEqual(exp.parameters["timeout_s"], 0.2)
+
+    def test_remote_http_backend_fails_closed_on_http_error(self):
+        from unittest.mock import patch
+        import urllib.error
+        err = urllib.error.URLError("connection refused")
+        with patch("urllib.request.urlopen", side_effect=err):
+            backend = RemoteHttpBackend(endpoint_url="http://localhost:8000/v1/chat")
+            dreamer = Dreamer(self.catalog, backend=backend)
+            from core.dream_contract import SecurityViolation
+            with self.assertRaises(SecurityViolation):
+                dreamer.dream("fuzz_gate_buffer")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
