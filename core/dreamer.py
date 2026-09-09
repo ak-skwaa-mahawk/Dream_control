@@ -6,10 +6,25 @@ Two-phase hypothesis generation:
 2. Low-entropy compilation into validated Experiment contracts.
 """
 
+import re
 import json
 from typing import Any, Callable, Mapping
 from core.dream_contract import HarnessSpec, Experiment, Observable
 from core.experiment_validator import decode_params, ParameterValidationError
+
+
+def extract_json_payload(raw_text: str) -> dict[str, Any]:
+    text = raw_text.strip()
+    if "```" in text:
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        match = re.search(r"(\{.*\})", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+    return json.loads(text)
+
 
 PERTURB_PROMPT_TEMPLATE = """[SYSTEM: PERTURBATION ENGINE - STAGE 1]
 You are a fault-injection researcher testing system invariants.
@@ -76,11 +91,11 @@ def generate_experiment(
         catalog_summary=catalog_summary,
         premise=premise.strip(),
     )
-    compiled_json_str = llm_callable(compile_prompt, 0.2)
+    compiled_raw = llm_callable(compile_prompt, 0.2)
 
     try:
-        raw_payload = json.loads(compiled_json_str)
-    except json.JSONDecodeError as err:
+        raw_payload = extract_json_payload(compiled_raw)
+    except (json.JSONDecodeError, AttributeError) as err:
         raise ParameterValidationError(f"Compiler produced invalid JSON: {err}") from err
 
     harness_id = raw_payload.get("harness_id")

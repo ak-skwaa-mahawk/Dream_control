@@ -2,12 +2,11 @@
 import json
 import unittest
 from pathlib import Path
-from core.dream_contract import HarnessSpec, ParamSpec, Experiment
+from core.dream_contract import HarnessSpec, ParamSpec
 from core.dreamer import generate_experiment
 from core.experiment_validator import ParameterValidationError
 
 class TestDreamer(unittest.TestCase):
-
     def setUp(self):
         self.spec = HarnessSpec(
             harness_id="fuzz_gate_buffer",
@@ -32,9 +31,8 @@ class TestDreamer(unittest.TestCase):
                 "parameters": {"timeout_s": 0.05, "concurrency": 64},
                 "expected": "admission_timeout",
                 "unexpected": ["statutory_veto_reached"],
-                "budget_ms": 1500
+                "budget_ms": 1500,
             })
-
         exp = generate_experiment(self.seed, self.catalog, mock_llm)
         self.assertEqual(exp.dream_id, "dream_test_001")
         self.assertEqual(exp.parameters["concurrency"], 64)
@@ -50,9 +48,27 @@ class TestDreamer(unittest.TestCase):
                 "parameters": {"timeout_s": 0.05, "concurrency": True},
                 "expected": "admission_timeout",
             })
-
         with self.assertRaises(ParameterValidationError):
             generate_experiment(self.seed, self.catalog, mock_llm)
+
+    def test_extract_markdown_fenced_payload(self):
+        fenced_output = """Here is the compiled experiment:
+```json
+{
+  \"dream_id\": \"dream_fenced\",
+  \"harness_id\": \"fuzz_gate_buffer\",
+  \"parameters\": {\"timeout_s\": 0.1, \"concurrency\": 16},
+  \"expected\": \"admission_timeout\",
+  \"unexpected\": [],
+  \"budget_ms\": 1000
+}
+```
+Hope this helps!"""
+        def mock_llm(prompt: str, temp: float) -> str:
+            return "speculative scenario" if temp > 1.0 else fenced_output
+        exp = generate_experiment(self.seed, self.catalog, mock_llm)
+        self.assertEqual(exp.dream_id, "dream_fenced")
+        self.assertEqual(exp.parameters["concurrency"], 16)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
