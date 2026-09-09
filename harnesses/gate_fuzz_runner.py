@@ -1,29 +1,88 @@
 #!/usr/bin/env python3
 """
 harnesses/gate_fuzz_runner.py
-Pinning adapter for the admission_gate policy engine.
-Consumes policy data exclusively through pre-opened file descriptors,
-preventing arbitrary host file reads from cell parameters.
+IPC client adapter for the admission_gate policy engine.
+Communicates with the live admission-gate daemon over a UNIX domain socket
+(or inherited socket descriptor) and captures statutory observables.
 """
 
 import os
 import sys
 import json
-import re
+import socket
+import select
 import argparse
 from pathlib import Path
 
-IMMUTABLE_FALLBACK_CHARTER = {
-    "prohibited_resource_patterns": [r"^/etc/.*", r"^/root/.*"],
-    "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
-}
+SOCKET_TIMEOUT_SEC = 1.0
 
 
-def evaluate_admission_policy(
+def query_gate_socket(
+    target_path: str,
+    action_type: str,
+    sock_path: str | None = None,
+) -> dict[str, bool] | None:
+    """
+    Connects to the admission-gate UNIX domain socket via inherited descriptor
+    or socket path, transmits the admission query, and maps the response to observables.
+    """
+    s = None
+    sock_fd_env = os.environ.get("ADMISSION_GATE_SOCK_FD")
+
+    try:
+        if sock_fd_env and sock_fd_env.isdigit():
+            fd = int(sock_fd_env)
+            s = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
+        elif sock_path and os.path.exists(sock_path):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(SOCKET_TIMEOUT_SEC)
+            s.connect(sock_path)
+        else:
+            return None
+
+        s.settimeout(SOCKET_TIMEOUT_SEC)
+        request = {
+            "action": "query",
+            "target_path": target_path,
+            "action_type": action_type,
+        }
+        wire_data = json.dumps(request).encode("utf-8") + b"\n"
+        s.sendall(wire_data)
+
+        buf = bytearray()
+        while b"\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf.extend(chunk)
+
+        if not buf:
+            return None
+
+        response = json.loads(buf.decode("utf-8").strip())
+        verdict = response.get("verdict") or response.get("status")
+
+        return {
+            "statutory_veto_reached": bool(verdict == "veto" or response.get("statutory_veto")),
+            "ultra_vires_detected": bool(verdict == "ultra_vires" or response.get("ultra_vires")),
+            "intra_vires_confirmed": bool(verdict in ("intra_vires", "allow", "confirmed") or response.get("intra_vires")),
+        }
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    finally:
+        if s and not sock_fd_env:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def evaluate_admission_policy_fallback(
     target_path: str,
     action_type: str,
     charter_dict: dict,
 ) -> dict[str, bool]:
+    import re
     probes = {
         "statutory_veto_reached": False,
         "ultra_vires_detected": False,
@@ -49,11 +108,7 @@ def evaluate_admission_policy(
     if auth_actions:
         action_authorized = action_type in auth_actions
 
-    if path_is_prohibited:
-        probes["statutory_veto_reached"] = True
-        probes["ultra_vires_detected"] = True
-        probes["intra_vires_confirmed"] = False
-    elif not action_authorized:
+    if path_is_prohibited or not action_authorized:
         probes["statutory_veto_reached"] = True
         probes["ultra_vires_detected"] = True
         probes["intra_vires_confirmed"] = False
@@ -66,7 +121,6 @@ def evaluate_admission_policy(
 
 
 def load_charter_pinned() -> dict:
-    """Reads policy charter exclusively via inherited file descriptor."""
     charter_fd_env = os.environ.get("ADMISSION_GATE_CHARTER_FD")
     if charter_fd_env and charter_fd_env.isdigit():
         fd = int(charter_fd_env)
@@ -76,7 +130,10 @@ def load_charter_pinned() -> dict:
         except Exception:
             pass
 
-    return IMMUTABLE_FALLBACK_CHARTER
+    return {
+        "prohibited_resource_patterns": [r"^/etc/.*", r"^/root/.*"],
+        "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
+    }
 
 
 def main():
@@ -93,9 +150,15 @@ def main():
 
     target_path = str(params.get("target_path", ""))
     action_type = str(params.get("action_type", ""))
+    sock_path = params.get("sock_path")
 
-    charter = load_charter_pinned()
-    probes = evaluate_admission_policy(target_path, action_type, charter)
+    # Primary path: query live socket if accessible
+    probes = query_gate_socket(target_path, action_type, sock_path)
+
+    # Fallback path: evaluate pinned charter
+    if probes is None:
+        charter = load_charter_pinned()
+        probes = evaluate_admission_policy_fallback(target_path, action_type, charter)
 
     output = {
         "status": "ok",
