@@ -28,12 +28,12 @@ class SignatureCorpus:
 
 
 def compute_signature(t: RawTrace) -> str:
-    iso = getattr(t, "isolation", {}) or {}
     payload = {
         "exit": t.exit_code,
         "signal": t.signal,
         "probes": dict(sorted(t.probes.items())),
-        "isolated": bool(iso.get("unshare") and iso.get("cgroup")),
+        "stdout_hash": t.stdout_hash,
+        "stderr_hash": t.stderr_hash,
     }
     return sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 

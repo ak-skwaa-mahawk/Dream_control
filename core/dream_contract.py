@@ -73,7 +73,6 @@ class Experiment:
             "parameters": self.parameters,
             "expected": self.expected,
             "unexpected": sorted(list(self.unexpected)),
-            "budget_ms": self.budget_ms,
         }
         encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()[:16]

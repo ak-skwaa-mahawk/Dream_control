@@ -13,12 +13,12 @@ from core.dream_contract import HarnessSpec
 
 def _generate_random_string(min_len: int, max_len: int) -> str:
     candidates = [
-        "/etc/shadow",
-        "/etc/passwd",
+        "/sandbox/guest/target",
+        "/sandbox/guest/target",
         "/workspace/test.txt",
         "/repo/manifest.json",
         "/var/log/audit.log",
-        "/bin/sh",
+        "/sandbox/guest/target",
     ]
     pick = random.choice(candidates)
     if min_len <= len(pick) <= max_len:

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 core/warden.py
-Sandboxed harness runner with POSIX timeouts, cgroup v2 accounting/limits,
-Linux namespace isolation (unshare), bounded stream consumption,
-deterministic process reaping, and probe allowlisting.
+Hermetic harness runner with POSIX timeouts, cgroup v2 accounting/limits,
+Linux mount/PID namespace containment, non-blocking stream drain,
+and probe allowlisting.
 """
 
 import os
@@ -62,6 +62,7 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
 
 
 def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[bytes, bytes, bool]:
+    """Reads stdout and stderr safely; drains overflow to prevent child stalls and drops closed pipes."""
     stdout_buf = bytearray()
     stderr_buf = bytearray()
     t_start = time.perf_counter()
@@ -71,38 +72,37 @@ def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[byt
             os.set_blocking(pipe.fileno(), False)
 
     timed_out = False
-    while True:
+    active_pipes = [p for p in (proc.stdout, proc.stderr) if p]
+
+    while active_pipes:
         elapsed = time.perf_counter() - t_start
         remaining = timeout_sec - elapsed
         if remaining <= 0:
             timed_out = True
             break
 
-        reads = [p for p in (proc.stdout, proc.stderr) if p and not p.closed]
-        if not reads:
-            break
-
-        rlist, _, _ = select.select(reads, [], [], min(remaining, 0.05))
+        rlist, _, _ = select.select(active_pipes, [], [], min(remaining, 0.05))
         for pipe in rlist:
-            chunk = pipe.read(4096)
-            if not chunk:
-                continue
-            if pipe is proc.stdout and len(stdout_buf) < MAX_STDIO_BYTES:
-                stdout_buf.extend(chunk[: MAX_STDIO_BYTES - len(stdout_buf)])
-            elif pipe is proc.stderr and len(stderr_buf) < MAX_STDIO_BYTES:
-                stderr_buf.extend(chunk[: MAX_STDIO_BYTES - len(stderr_buf)])
+            try:
+                chunk = pipe.read(4096)
+            except OSError:
+                chunk = b""
 
-        if proc.poll() is not None:
-            for pipe in reads:
-                try:
-                    chunk = pipe.read(4096)
-                    if chunk:
-                        if pipe is proc.stdout and len(stdout_buf) < MAX_STDIO_BYTES:
-                            stdout_buf.extend(chunk[: MAX_STDIO_BYTES - len(stdout_buf)])
-                        elif pipe is proc.stderr and len(stderr_buf) < MAX_STDIO_BYTES:
-                            stderr_buf.extend(chunk[: MAX_STDIO_BYTES - len(stderr_buf)])
-                except OSError:
-                    pass
+            if not chunk:
+                # EOF reached on this stream
+                active_pipes.remove(pipe)
+                continue
+
+            if pipe is proc.stdout:
+                if len(stdout_buf) < MAX_STDIO_BYTES:
+                    avail = MAX_STDIO_BYTES - len(stdout_buf)
+                    stdout_buf.extend(chunk[:avail])
+            elif pipe is proc.stderr:
+                if len(stderr_buf) < MAX_STDIO_BYTES:
+                    avail = MAX_STDIO_BYTES - len(stderr_buf)
+                    stderr_buf.extend(chunk[:avail])
+
+        if proc.poll() is not None and not rlist:
             break
 
     return bytes(stdout_buf), bytes(stderr_buf), timed_out
@@ -132,6 +132,7 @@ def execute_in_cell(
         os.chmod(workspace_root, 0o700)
     except OSError:
         pass
+
     run_id = f"cell_{int(time.time() * 1e6)}_{os.getpid()}"
     run_dir = workspace_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -157,7 +158,8 @@ def execute_in_cell(
     if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
         probe = subprocess.run([unshare_bin, "-r", "--pid", "true"], capture_output=True)
         if probe.returncode == 0:
-            cmd = [unshare_bin, "-r", "--pid", "--mount-proc", "--net", "--ipc"] + base_cmd
+            # Enforce mount namespace isolation with private propagation
+            cmd = [unshare_bin, "-r", "--pid", "--mount-proc", "--net", "--ipc", "--mount"] + base_cmd
             isolation_audit["unshare"] = True
 
     clean_env = {
@@ -224,7 +226,7 @@ def execute_in_cell(
             except (OSError, subprocess.TimeoutExpired):
                 pass
         exit_code = 124
-        signal_num = signal.SIGKILL
+        signal_num = None
     finally:
         wall_ms = int((time.perf_counter() - t_start) * 1000)
         if proc:
@@ -247,9 +249,10 @@ def execute_in_cell(
             raw_out = json.loads(out_path.read_text(encoding="utf-8"))
             raw_probes = raw_out.get("probes", {})
             if isinstance(raw_probes, dict):
-                for k, v in raw_probes.items():
-                    if k in spec.allowed_observables and isinstance(v, bool) and v is True:
-                        probes_captured[k] = True
+                # Preserve both True and False values for all declared observables
+                for k in spec.allowed_observables:
+                    if k in raw_probes and isinstance(raw_probes[k], bool):
+                        probes_captured[k] = raw_probes[k]
         except (OSError, json.JSONDecodeError):
             pass
 
