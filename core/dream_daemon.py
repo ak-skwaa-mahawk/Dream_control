@@ -16,7 +16,7 @@ from core.dream_scheduler import schedule_next_dream
 from core.dreamer import generate_experiment
 from core.warden import execute_in_cell
 from core.dream_evaluator import SignatureCorpus, evaluate_traces, compute_signature
-from core.telemetry_seed import extract_log_seeds, write_seed_bank
+from core.telemetry_seed import collect_all_seeds, extract_log_seeds, write_seed_bank
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dream_daemon")
@@ -35,6 +35,7 @@ class DreamDaemon:
         corpus_path: Path | None = None,
         flaky_bank_path: Path | None = None,
         log_dir: Path | None = None,
+        audit_path: Path | None = None,
         k_replicates: int = DEFAULT_K_REPLICATES,
     ):
         self.catalog = catalog
@@ -45,6 +46,7 @@ class DreamDaemon:
         self.llm_callable = llm_callable
         self.harness_tree = harness_tree
         self.log_dir = log_dir
+        self.audit_path = audit_path
         self.k_replicates = max(1, k_replicates)
 
         self.corpus = self._load_corpus()
@@ -81,7 +83,12 @@ class DreamDaemon:
         self.corpus_path.write_text(json.dumps(self.corpus._corpus, indent=2), encoding="utf-8")
 
     def run_cycle(self) -> dict[str, Any] | None:
-        outliers = extract_log_seeds(log_dir=self.log_dir) if self.log_dir else []
+        outliers: list[dict[str, Any]] = []
+        if self.log_dir or self.audit_path:
+            log_d = self.log_dir or Path("/nonexistent/log/dir")
+            audit_f = self.audit_path or Path("/nonexistent/audit.jsonl")
+            outliers = collect_all_seeds(log_dir=log_d, audit_path=audit_f)
+
         plan = schedule_next_dream(self.promoted_seeds, self.catalog, outliers)
         mode = plan["mode"]
         logger.info(f"Dispatching cycle with mode: {mode}")
