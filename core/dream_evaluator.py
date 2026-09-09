@@ -1,77 +1,113 @@
 #!/usr/bin/env python3
 """
-core/dream_evaluator.py
-Pure evaluation logic, bit-exact trace signatures, and corpus-frequency novelty decay.
+core/dream_daemon.py
+Top-level autonomous idle runner coordinating scheduling, generation,
+warden execution, trace evaluation, and seed bank updates.
 """
 
-from hashlib import sha256
+import time
 import json
-from typing import Sequence
-from core.dream_contract import Experiment, RawTrace, Verdict
+import logging
+from pathlib import Path
+from typing import Callable, Mapping, Any
+
+from core.dream_contract import HarnessSpec, Experiment, RawTrace
+from core.dream_scheduler import schedule_next_dream
+from core.dreamer import generate_experiment
+from core.warden import execute_in_cell
+from core.dream_evaluator import SignatureCorpus, evaluate_traces, compute_signature
+from core.telemetry_seed import extract_log_seeds, write_seed_bank
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("dream_daemon")
 
 
-class SignatureCorpus:
-    """Tracks historical signatures per harness to compute frequency-based novelty decay."""
+class DreamDaemon:
+    def __init__(
+        self,
+        catalog: Mapping[str, HarnessSpec],
+        workspace_root: Path,
+        seed_bank_path: Path,
+        llm_callable: Callable[[str, float], str],
+        harness_tree: Path | None = None,
+    ):
+        self.catalog = catalog
+        self.workspace_root = workspace_root
+        self.seed_bank_path = seed_bank_path
+        self.llm_callable = llm_callable
+        self.harness_tree = harness_tree
+        self.corpus = SignatureCorpus()
+        self.promoted_seeds: list[dict[str, Any]] = self._load_seeds()
 
-    def __init__(self):
-        self._corpus: dict[str, list[str]] = {}
+    def _load_seeds(self) -> list[dict[str, Any]]:
+        if self.seed_bank_path.is_file():
+            try:
+                return json.loads(self.seed_bank_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        return []
 
-    def get_novelty(self, harness_id: str, sig0: str) -> float:
-        history = self._corpus.get(harness_id, [])
-        matches = sum(1 for s in history if s == sig0)
-        return 1.0 - (matches / (1.0 + len(history)))
+    def _save_seeds(self) -> None:
+        write_seed_bank(self.promoted_seeds, self.seed_bank_path)
 
-    def record(self, harness_id: str, sig0: str) -> None:
-        if harness_id not in self._corpus:
-            self._corpus[harness_id] = []
-        self._corpus[harness_id].append(sig0)
+    def run_cycle(self) -> dict[str, Any] | None:
+        # Extract live telemetry residue
+        outliers = extract_log_seeds()
+        plan = schedule_next_dream(self.promoted_seeds, self.catalog, outliers)
+        mode = plan["mode"]
+        logger.info(f"Dispatching cycle with mode: {mode}")
 
+        exp: Experiment
+        if mode == "telemetry_perturbation":
+            try:
+                exp = generate_experiment(plan["seed_data"], self.catalog, self.llm_callable)
+            except Exception as e:
+                logger.warning(f"Generation failed for telemetry seed: {e}")
+                return None
+        else:
+            hid = plan["harness_id"]
+            spec = self.catalog[hid]
+            exp = Experiment(
+                dream_id=f"dream_{int(time.time()*1000)}",
+                harness_id=hid,
+                parameters=plan["parameters"],
+                expected=next(iter(spec.allowed_observables)) if spec.allowed_observables else "timeout",
+                unexpected=("panic",),
+                budget_ms=1000,
+            )
 
-def compute_signature(t: RawTrace) -> str:
-    payload = {
-        "exit": t.exit_code,
-        "signal": t.signal,
-        "probes": dict(sorted(t.probes.items())),
-    }
-    return sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+        spec = self.catalog[exp.harness_id]
+        trace: RawTrace = execute_in_cell(
+            spec=spec,
+            validated_params=dict(exp.parameters),
+            budget_ms=exp.budget_ms,
+            workspace_root=self.workspace_root,
+            harness_tree=self.harness_tree,
+        )
 
+        sig0 = compute_signature(trace)
+        novelty = self.corpus.get_novelty(exp.harness_id, sig0)
+        verdict = evaluate_traces(exp, [trace], novelty=novelty)
+        self.corpus.record(exp.harness_id, sig0)
 
-def evaluate_traces(
-    exp: Experiment,
-    traces: Sequence[RawTrace],
-    novelty: float,
-    tau: float = 2.0,
-) -> Verdict:
-    if not traces:
-        raise ValueError("Must supply at least one trace for evaluation.")
+        logger.info(
+            f"Cycle finished: decision={verdict.decision} score={verdict.score:.2f} novelty={verdict.novelty:.2f}"
+        )
 
-    primary = traces[0]
-    sig0 = compute_signature(primary)
+        if verdict.decision in ("promote_candidate", "flaky"):
+            self.promoted_seeds.append({
+                "experiment_hash": exp.experiment_hash,
+                "harness_id": exp.harness_id,
+                "parameters": dict(exp.parameters),
+                "signature": sig0,
+                "score": verdict.score,
+                "decision": verdict.decision,
+            })
+            self._save_seeds()
 
-    observed = {name for name, bit in primary.probes.items() if bit}
-    if primary.signal not in (None, 0) or (primary.exit_code is not None and primary.exit_code < 0):
-        observed.add("panic")
-    if primary.exit_code == 124:
-        observed.add("timeout")
-
-    match = exp.expected in observed
-    surprise = any(u in observed for u in exp.unexpected)
-
-    score = (1.0 if match else 0.0) + (2.0 if surprise else 0.0) + novelty
-    reproduced = all(compute_signature(t) == sig0 for t in traces)
-
-    if score < tau:
-        decision = "discard"
-    elif reproduced:
-        decision = "promote_candidate"
-    else:
-        decision = "flaky"
-
-    return Verdict(
-        score=score,
-        match=match,
-        surprise=surprise,
-        novelty=novelty,
-        signature=sig0,
-        decision=decision,
-    )
+        return {
+            "dream_id": exp.dream_id,
+            "decision": verdict.decision,
+            "score": verdict.score,
+            "trace": trace,
+        }
