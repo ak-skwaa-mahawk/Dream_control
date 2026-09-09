@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 core/experiment_validator.py
-Decodes and validates raw dictionary payloads against strict HarnessSpec schemas.
+Validates raw experiment parameter mappings against HarnessSpec bounds and types.
 """
 
+from typing import Any
 from core.dream_contract import HarnessSpec
 
 
@@ -11,32 +12,32 @@ class ParameterValidationError(Exception):
     pass
 
 
-def decode_params(spec: HarnessSpec, raw: dict) -> dict[str, int | float]:
-    out: dict[str, int | float] = {}
+def decode_params(spec: HarnessSpec, raw: dict) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     extra = set(raw) - set(spec.params)
     if extra:
         raise ParameterValidationError(f"unknown params: {sorted(extra)}")
 
     for name, ps in spec.params.items():
         if name not in raw:
-            raise ParameterValidationError(f"missing parameter: {name}")
+            raise ParameterValidationError(f"missing param: {name}")
         val = raw[name]
 
-        # Explicit bool check: isinstance(True, int) is True in Python
-        if isinstance(val, bool) or not isinstance(val, (int, float)):
-            raise ParameterValidationError(f"parameter '{name}' is not numeric")
-
-        if ps.kind == "int":
-            if not isinstance(val, int) or isinstance(val, bool):
-                raise ParameterValidationError(f"parameter '{name}' must be int")
-            decoded: int | float = val
+        if ps.kind == "str":
+            if not isinstance(val, str):
+                raise ParameterValidationError(f"parameter '{name}' is not string")
+            if not (ps.lo <= len(val) <= ps.hi):
+                raise ParameterValidationError(
+                    f"parameter '{name}' length {len(val)} out of bounds [{ps.lo}, {ps.hi}]"
+                )
+            out[name] = val
         else:
-            decoded = float(val)
-
-        if not (ps.lo <= decoded <= ps.hi):
-            raise ParameterValidationError(
-                f"parameter '{name}' value {decoded} out of bounds [{ps.lo}, {ps.hi}]"
-            )
-        out[name] = decoded
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise ParameterValidationError(f"parameter '{name}' is not numeric")
+            if not (ps.lo <= val <= ps.hi):
+                raise ParameterValidationError(
+                    f"parameter '{name}' value {val} out of bounds [{ps.lo}, {ps.hi}]"
+                )
+            out[name] = int(val) if ps.kind == "int" else float(val)
 
     return out
