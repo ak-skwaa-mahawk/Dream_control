@@ -74,6 +74,7 @@ class TestInvariantsAndHardening(unittest.TestCase):
             self.assertIn("session", trace.isolation)
             self.assertIn("unshare", trace.isolation)
             self.assertIn("cgroup", trace.isolation)
+            self.assertIn("landlock", trace.isolation)
 
 
 if __name__ == "__main__":

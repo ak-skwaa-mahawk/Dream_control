@@ -2,8 +2,8 @@
 """
 core/warden.py
 Hermetic harness runner with POSIX timeouts, cgroup v2 accounting/limits,
-Linux mount/PID namespace containment, non-blocking stream drain,
-and probe allowlisting.
+Linux mount/PID namespace containment, Landlock ABI filesystem restrictions,
+non-blocking stream drain, and probe allowlisting.
 """
 
 import os
@@ -13,6 +13,7 @@ import json
 import signal
 import select
 import hashlib
+import ctypes
 import subprocess
 from pathlib import Path
 from typing import Mapping, Any
@@ -22,6 +23,127 @@ from core.dream_contract import HarnessSpec, RawTrace, SecurityViolation
 MAX_STDIO_BYTES = 64 * 1024
 DEFAULT_MEM_MAX_BYTES = 128 * 1024 * 1024  # 128MB ceiling
 DEFAULT_CGROUP2_ROOT = Path("/sys/fs/cgroup")
+
+# Landlock ABI constants
+LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
+LANDLOCK_RULE_PATH_BENEATH = 1
+PR_SET_NO_NEW_PRIVS = 38
+
+# Access rights (ABI v1)
+ACCESS_FS_EXECUTE = 1 << 0
+ACCESS_FS_WRITE_FILE = 1 << 1
+ACCESS_FS_READ_FILE = 1 << 2
+ACCESS_FS_READ_DIR = 1 << 3
+ACCESS_FS_REMOVE_DIR = 1 << 4
+ACCESS_FS_REMOVE_FILE = 1 << 5
+ACCESS_FS_MAKE_CHAR = 1 << 6
+ACCESS_FS_MAKE_DIR = 1 << 7
+ACCESS_FS_MAKE_REG = 1 << 8
+ACCESS_FS_MAKE_SOCK = 1 << 9
+ACCESS_FS_MAKE_FIFO = 1 << 10
+ACCESS_FS_MAKE_BLOCK = 1 << 11
+ACCESS_FS_MAKE_SYM = 1 << 12
+
+ACCESS_FS_RO = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR
+ACCESS_FS_RW = (
+    ACCESS_FS_RO
+    | ACCESS_FS_WRITE_FILE
+    | ACCESS_FS_REMOVE_DIR
+    | ACCESS_FS_REMOVE_FILE
+    | ACCESS_FS_MAKE_DIR
+    | ACCESS_FS_MAKE_REG
+)
+
+
+class LandlockRulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+class LandlockPathBeneathAttr(ctypes.Structure):
+    _fields_ = [
+        ("allowed_access", ctypes.c_uint64),
+        ("parent_fd", ctypes.c_int32),
+    ]
+
+
+def _get_syscall_numbers():
+    # Syscall numbers for x86_64 and aarch64 (ARM64)
+    import platform
+    machine = platform.machine().lower()
+    if "aarch64" in machine or "arm64" in machine:
+        return 444, 445, 446  # create_ruleset, add_rule, restrict_self
+    # Default to x86_64
+    return 444, 445, 446
+
+
+def _probe_landlock() -> bool:
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        sys_create_ruleset, _, _ = _get_syscall_numbers()
+        res = libc.syscall(sys_create_ruleset, None, 0, LANDLOCK_CREATE_RULESET_VERSION)
+        return res >= 1
+    except Exception:
+        return False
+
+
+HAS_LANDLOCK = _probe_landlock()
+
+
+def _apply_landlock(run_dir: Path, harness_path: Path):
+    if not HAS_LANDLOCK:
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    sys_create_ruleset, sys_add_rule, sys_restrict_self = _get_syscall_numbers()
+
+    attr = LandlockRulesetAttr()
+    attr.handled_access_fs = ACCESS_FS_RW
+
+    ruleset_fd = libc.syscall(sys_create_ruleset, ctypes.byref(attr), ctypes.sizeof(attr), 0)
+    if ruleset_fd < 0:
+        return
+
+    try:
+        # Paths to allow read-only access (interpreter, standard libs, harness binary)
+        ro_paths = [
+            "/usr",
+            "/lib",
+            "/bin",
+            sys.prefix,
+            str(harness_path.resolve()),
+        ]
+        # On Android / Termux environments
+        termux_prefix = os.environ.get("PREFIX")
+        if termux_prefix and os.path.exists(termux_prefix):
+            ro_paths.append(termux_prefix)
+
+        for p in ro_paths:
+            if not os.path.exists(p):
+                continue
+            fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
+            try:
+                path_attr = LandlockPathBeneathAttr()
+                path_attr.allowed_access = ACCESS_FS_RO
+                path_attr.parent_fd = fd
+                libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+            finally:
+                os.close(fd)
+
+        # Allow full read-write access to the ephemeral cell directory only
+        rw_fd = os.open(str(run_dir.resolve()), os.O_PATH | os.O_CLOEXEC)
+        try:
+            path_attr = LandlockPathBeneathAttr()
+            path_attr.allowed_access = ACCESS_FS_RW
+            path_attr.parent_fd = rw_fd
+            libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+        finally:
+            os.close(rw_fd)
+
+        # Apply no_new_privs and enforce restrictions
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0:
+            libc.syscall(sys_restrict_self, ruleset_fd, 0)
+    finally:
+        os.close(ruleset_fd)
 
 
 def _try_setup_cgroup(cell_id: str, mem_max: int = DEFAULT_MEM_MAX_BYTES) -> tuple[Path | None, bool]:
@@ -62,7 +184,6 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
 
 
 def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[bytes, bytes, bool]:
-    """Reads stdout and stderr safely; drains overflow to prevent child stalls and drops closed pipes."""
     stdout_buf = bytearray()
     stderr_buf = bytearray()
     t_start = time.perf_counter()
@@ -89,7 +210,6 @@ def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[byt
                 chunk = b""
 
             if not chunk:
-                # EOF reached on this stream
                 active_pipes.remove(pipe)
                 continue
 
@@ -151,6 +271,7 @@ def execute_in_cell(
     isolation_audit = {
         "unshare": False,
         "cgroup": False,
+        "landlock": bool(HAS_LANDLOCK),
         "session": True,
     }
 
@@ -158,7 +279,6 @@ def execute_in_cell(
     if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
         probe = subprocess.run([unshare_bin, "-r", "--pid", "true"], capture_output=True)
         if probe.returncode == 0:
-            # Enforce mount namespace isolation with private propagation
             cmd = [unshare_bin, "-r", "--pid", "--mount-proc", "--net", "--ipc", "--mount"] + base_cmd
             isolation_audit["unshare"] = True
 
@@ -180,6 +300,8 @@ def execute_in_cell(
                 (cg_path / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
             except OSError:
                 pass
+        if HAS_LANDLOCK:
+            _apply_landlock(run_dir, resolved_binary)
 
     timeout_sec = max(0.01, budget_ms / 1000.0)
     stdout_bytes = b""
@@ -199,7 +321,7 @@ def execute_in_cell(
             stderr=subprocess.PIPE,
             start_new_session=True,
             pass_fds=pass_fds,
-            preexec_fn=_preexec_init if has_cg else None,
+            preexec_fn=_preexec_init if (has_cg or HAS_LANDLOCK) else None,
         )
         stdout_bytes, stderr_bytes, timed_out = _read_bounded_pipes(proc, timeout_sec)
         if timed_out:
@@ -249,7 +371,6 @@ def execute_in_cell(
             raw_out = json.loads(out_path.read_text(encoding="utf-8"))
             raw_probes = raw_out.get("probes", {})
             if isinstance(raw_probes, dict):
-                # Preserve both True and False values for all declared observables
                 for k in spec.allowed_observables:
                     if k in raw_probes and isinstance(raw_probes[k], bool):
                         probes_captured[k] = raw_probes[k]
