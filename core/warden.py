@@ -323,7 +323,9 @@ def execute_in_cell(
     if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
         probe = subprocess.run([unshare_bin, "-r", "--fork", "--pid", "true"], capture_output=True)
         if probe.returncode == 0:
-            cmd = [unshare_bin, "-r", "--fork", "--pid", "--mount-proc", "--net", "--ipc", "--uts", "--mount"] + base_cmd
+            # Probe if unshare supports cgroup namespace flag
+            cg_flag = ["--cgroup"] if subprocess.run([unshare_bin, "--help"], capture_output=True).stdout.find(b"--cgroup") != -1 else []
+            cmd = [unshare_bin, "-r", "--fork", "--pid", "--mount-proc", "--net", "--ipc", "--uts", "--mount"] + cg_flag + base_cmd
             has_unshare = True
             isolation_audit["unshare"] = True
 

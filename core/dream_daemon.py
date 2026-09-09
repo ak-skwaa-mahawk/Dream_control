@@ -206,6 +206,8 @@ class DreamDaemon:
             "signature": sig0,
             "score": verdict.score,
             "decision": verdict.decision,
+            "reasons": list(verdict.reasons),
+            "isolation": dict(traces[0].isolation),
             "k_replicates": self.k_replicates,
         }
 
