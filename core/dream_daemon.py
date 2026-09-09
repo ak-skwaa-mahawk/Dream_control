@@ -217,6 +217,7 @@ class DreamDaemon:
                 self.promoted_seeds.append(entry)
                 self._save_json_list(self.promoted_seeds, self.seed_bank_path)
         elif verdict.decision == "flaky":
+            entry["divergent_signatures"] = sorted({compute_signature(t) for t in traces})
             existing_flaky = {(s["harness_id"], s["signature"]) for s in self.flaky_seeds}
             if (entry["harness_id"], entry["signature"]) not in existing_flaky:
                 self.flaky_seeds.append(entry)
