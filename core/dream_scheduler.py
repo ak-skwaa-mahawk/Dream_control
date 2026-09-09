@@ -57,10 +57,13 @@ def schedule_next_dream(
     catalog: Mapping[str, HarnessSpec],
     telemetry_outliers: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    valid_promoted = [s for s in promoted_seeds if s.get("harness_id") in catalog]
+    valid_outliers = [o for o in telemetry_outliers if o.get("harness_id") in catalog]
+
     modes = []
-    if promoted_seeds:
+    if valid_promoted:
         modes.append(("seed_mutation", 0.70))
-    if telemetry_outliers:
+    if valid_outliers:
         modes.append(("telemetry_perturbation", 0.20))
     modes.append(("cold_uniform", 0.10))
 
@@ -76,7 +79,7 @@ def schedule_next_dream(
             break
 
     if selected_mode == "seed_mutation":
-        seed = random.choice(promoted_seeds)
+        seed = random.choice(valid_promoted)
         spec = catalog[seed["harness_id"]]
         mutated = dict(seed["parameters"])
         t_key = random.choice(list(spec.params.keys()))
@@ -106,7 +109,7 @@ def schedule_next_dream(
         }
 
     if selected_mode == "telemetry_perturbation":
-        outlier = random.choice(telemetry_outliers)
+        outlier = random.choice(valid_outliers)
         return {
             "mode": "telemetry_perturbation",
             "seed_data": outlier,
