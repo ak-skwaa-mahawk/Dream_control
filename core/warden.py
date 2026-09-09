@@ -29,7 +29,6 @@ LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
 LANDLOCK_RULE_PATH_BENEATH = 1
 PR_SET_NO_NEW_PRIVS = 38
 
-# Access rights (ABI v1)
 ACCESS_FS_EXECUTE = 1 << 0
 ACCESS_FS_WRITE_FILE = 1 << 1
 ACCESS_FS_READ_FILE = 1 << 2
@@ -67,83 +66,93 @@ class LandlockPathBeneathAttr(ctypes.Structure):
 
 
 def _get_syscall_numbers():
-    # Syscall numbers for x86_64 and aarch64 (ARM64)
     import platform
     machine = platform.machine().lower()
     if "aarch64" in machine or "arm64" in machine:
-        return 444, 445, 446  # create_ruleset, add_rule, restrict_self
-    # Default to x86_64
+        return 444, 445, 446
     return 444, 445, 446
 
 
-def _probe_landlock() -> bool:
+def _probe_landlock_safe() -> bool:
+    """Probes Landlock availability in a subprocess to avoid SIGSYS killing the parent."""
+    probe_code = (
+        "import ctypes\n"
+        "try:\n"
+        "    libc = ctypes.CDLL(None)\n"
+        "    # 444 is landlock_create_ruleset\n"
+        "    res = libc.syscall(444, None, 0, 1)\n"
+        "    exit(0 if res >= 1 else 1)\n"
+        "except Exception:\n"
+        "    exit(1)\n"
+    )
     try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        sys_create_ruleset, _, _ = _get_syscall_numbers()
-        res = libc.syscall(sys_create_ruleset, None, 0, LANDLOCK_CREATE_RULESET_VERSION)
-        return res >= 1
+        res = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            capture_output=True,
+            timeout=1.0,
+        )
+        return res.returncode == 0
     except Exception:
         return False
 
 
-HAS_LANDLOCK = _probe_landlock()
+HAS_LANDLOCK = _probe_landlock_safe()
 
 
 def _apply_landlock(run_dir: Path, harness_path: Path):
     if not HAS_LANDLOCK:
         return
 
-    libc = ctypes.CDLL(None, use_errno=True)
-    sys_create_ruleset, sys_add_rule, sys_restrict_self = _get_syscall_numbers()
-
-    attr = LandlockRulesetAttr()
-    attr.handled_access_fs = ACCESS_FS_RW
-
-    ruleset_fd = libc.syscall(sys_create_ruleset, ctypes.byref(attr), ctypes.sizeof(attr), 0)
-    if ruleset_fd < 0:
-        return
-
     try:
-        # Paths to allow read-only access (interpreter, standard libs, harness binary)
-        ro_paths = [
-            "/usr",
-            "/lib",
-            "/bin",
-            sys.prefix,
-            str(harness_path.resolve()),
-        ]
-        # On Android / Termux environments
-        termux_prefix = os.environ.get("PREFIX")
-        if termux_prefix and os.path.exists(termux_prefix):
-            ro_paths.append(termux_prefix)
+        libc = ctypes.CDLL(None, use_errno=True)
+        sys_create_ruleset, sys_add_rule, sys_restrict_self = _get_syscall_numbers()
 
-        for p in ro_paths:
-            if not os.path.exists(p):
-                continue
-            fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
+        attr = LandlockRulesetAttr()
+        attr.handled_access_fs = ACCESS_FS_RW
+
+        ruleset_fd = libc.syscall(sys_create_ruleset, ctypes.byref(attr), ctypes.sizeof(attr), 0)
+        if ruleset_fd < 0:
+            return
+
+        try:
+            ro_paths = [
+                "/usr",
+                "/lib",
+                "/bin",
+                sys.prefix,
+                str(harness_path.resolve()),
+            ]
+            termux_prefix = os.environ.get("PREFIX")
+            if termux_prefix and os.path.exists(termux_prefix):
+                ro_paths.append(termux_prefix)
+
+            for p in ro_paths:
+                if not os.path.exists(p):
+                    continue
+                fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
+                try:
+                    path_attr = LandlockPathBeneathAttr()
+                    path_attr.allowed_access = ACCESS_FS_RO
+                    path_attr.parent_fd = fd
+                    libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+                finally:
+                    os.close(fd)
+
+            rw_fd = os.open(str(run_dir.resolve()), os.O_PATH | os.O_CLOEXEC)
             try:
                 path_attr = LandlockPathBeneathAttr()
-                path_attr.allowed_access = ACCESS_FS_RO
-                path_attr.parent_fd = fd
+                path_attr.allowed_access = ACCESS_FS_RW
+                path_attr.parent_fd = rw_fd
                 libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
             finally:
-                os.close(fd)
+                os.close(rw_fd)
 
-        # Allow full read-write access to the ephemeral cell directory only
-        rw_fd = os.open(str(run_dir.resolve()), os.O_PATH | os.O_CLOEXEC)
-        try:
-            path_attr = LandlockPathBeneathAttr()
-            path_attr.allowed_access = ACCESS_FS_RW
-            path_attr.parent_fd = rw_fd
-            libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+            if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0:
+                libc.syscall(sys_restrict_self, ruleset_fd, 0)
         finally:
-            os.close(rw_fd)
-
-        # Apply no_new_privs and enforce restrictions
-        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0:
-            libc.syscall(sys_restrict_self, ruleset_fd, 0)
-    finally:
-        os.close(ruleset_fd)
+            os.close(ruleset_fd)
+    except Exception:
+        pass
 
 
 def _try_setup_cgroup(cell_id: str, mem_max: int = DEFAULT_MEM_MAX_BYTES) -> tuple[Path | None, bool]:
