@@ -2,9 +2,9 @@
 import tempfile
 import unittest
 from pathlib import Path
-from core.dream_contract import HarnessSpec, ParamSpec, SecurityViolation
+from core.dream_contract import HarnessSpec, ParamSpec, RawTrace, SecurityViolation
 from core.experiment_validator import decode_params, ParameterValidationError
-from core.warden import execute_in_cell
+from core.warden import execute_in_cell, CellBackend, HostLandlockBackend, DockerCellBackend
 from harnesses.gate_fuzz_runner import load_charter_pinned
 
 
@@ -153,6 +153,67 @@ class TestInvariantsAndHardening(unittest.TestCase):
                 self.assertEqual(trace.exit_code, 0)
                 self.assertIsNotNone(trace.stdout_hash)
 
+
+
+    def test_cell_backend_protocol_conformance(self):
+        host_backend = HostLandlockBackend()
+        docker_backend = DockerCellBackend()
+        self.assertIsInstance(host_backend, CellBackend)
+        self.assertIsInstance(docker_backend, CellBackend)
+
+    def test_docker_backend_fails_closed_when_unavailable_and_required(self):
+        backend = DockerCellBackend(docker_bin="/nonexistent/docker/bin")
+        self.assertFalse(backend.is_available())
+        spec = HarnessSpec(
+            harness_id="test_runner",
+            target_subsystem="core",
+            params={},
+            allowed_observables=frozenset(["timeout"]),
+            runner_binary=Path("/bin/true"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaises(SecurityViolation):
+                backend.execute(
+                    spec=spec,
+                    validated_params={},
+                    budget_ms=1000,
+                    workspace_root=tmp_path / "workspace",
+                    harness_tree=Path("/bin"),
+                    require_isolation=True,
+                )
+
+    def test_execute_in_cell_dispatches_to_custom_backend(self):
+        class MockBackend:
+            def execute(self, **kwargs):
+                return RawTrace(
+                    exit_code=0,
+                    wall_ms=10,
+                    probes={"mock_dispatched": True},
+                    stdout_hash="mock_out",
+                    stderr_hash="mock_err",
+                    signal=None,
+                    max_rss_kb=1024,
+                    isolation={"backend": "mock"},
+                )
+
+        spec = HarnessSpec(
+            harness_id="test_runner",
+            target_subsystem="core",
+            params={},
+            allowed_observables=frozenset(),
+            runner_binary=Path("/bin/true"),
+        )
+        trace = execute_in_cell(
+            spec=spec,
+            validated_params={},
+            budget_ms=1000,
+            workspace_root=Path("/tmp"),
+            harness_tree=Path("/bin"),
+            backend=MockBackend(),
+        )
+        self.assertTrue(trace.probes.get("mock_dispatched"))
+        self.assertEqual(trace.isolation.get("backend"), "mock")
 
 if __name__ == "__main__":
     unittest.main()

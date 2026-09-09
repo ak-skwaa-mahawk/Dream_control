@@ -16,8 +16,10 @@ import hashlib
 import ctypes
 import platform
 import subprocess
+import shutil
+import uuid
 from pathlib import Path
-from typing import Mapping, Any
+from typing import Protocol, runtime_checkable, Mapping, Any
 
 from core.dream_contract import HarnessSpec, RawTrace, SecurityViolation
 
@@ -277,7 +279,7 @@ def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[byt
     return bytes(stdout_buf), bytes(stderr_buf), timed_out
 
 
-def execute_in_cell(
+def _execute_host_landlock(
     spec: HarnessSpec,
     validated_params: Mapping[str, Any],
     budget_ms: int,
@@ -496,4 +498,243 @@ def execute_in_cell(
         signal=signal_num,
         max_rss_kb=max_rss_kb,
         isolation=isolation_audit,
+    )
+
+
+@runtime_checkable
+class CellBackend(Protocol):
+    """Abstract boundary protocol for hermetic execution cell backends."""
+
+    def execute(
+        self,
+        spec: HarnessSpec,
+        validated_params: dict[str, Any],
+        budget_ms: int,
+        workspace_root: Path,
+        harness_tree: Path,
+        pass_fds: tuple[int, ...] = (),
+        extra_env: Mapping[str, str] | None = None,
+        require_isolation: bool = False,
+    ) -> RawTrace:
+        ...
+
+
+class HostLandlockBackend:
+    """Host-level isolation engine using Linux namespaces, cgroups v2, and Landlock ABI."""
+
+    def execute(
+        self,
+        spec: HarnessSpec,
+        validated_params: dict[str, Any],
+        budget_ms: int,
+        workspace_root: Path,
+        harness_tree: Path,
+        pass_fds: tuple[int, ...] = (),
+        extra_env: Mapping[str, str] | None = None,
+        require_isolation: bool = False,
+    ) -> RawTrace:
+        return _execute_host_landlock(
+            spec=spec,
+            validated_params=validated_params,
+            budget_ms=budget_ms,
+            workspace_root=workspace_root,
+            harness_tree=harness_tree,
+            pass_fds=pass_fds,
+            extra_env=extra_env,
+            require_isolation=require_isolation,
+        )
+
+
+class DockerCellBackend:
+    """Container-level isolation engine executing harnesses inside hermetic OCI containers."""
+
+    def __init__(
+        self,
+        image: str = "python:3.14-slim",
+        docker_bin: str = "docker",
+        memory_limit: str = "256m",
+        pids_limit: int = 64,
+        cpus: float = 0.5,
+    ):
+        self.image = image
+        self.docker_bin = docker_bin
+        self.memory_limit = memory_limit
+        self.pids_limit = pids_limit
+        self.cpus = cpus
+
+    def is_available(self) -> bool:
+        bin_path = shutil.which(self.docker_bin)
+        if not bin_path:
+            return False
+        try:
+            res = subprocess.run(
+                [bin_path, "info"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def execute(
+        self,
+        spec: HarnessSpec,
+        validated_params: dict[str, Any],
+        budget_ms: int,
+        workspace_root: Path,
+        harness_tree: Path,
+        pass_fds: tuple[int, ...] = (),
+        extra_env: Mapping[str, str] | None = None,
+        require_isolation: bool = False,
+    ) -> RawTrace:
+        available = self.is_available()
+        if require_isolation and not available:
+            raise SecurityViolation(
+                "Host environment failed required Docker isolation guarantees: docker daemon unavailable"
+            )
+
+        workspace_root = workspace_root.resolve()
+        harness_tree = harness_tree.resolve()
+        target_path = (harness_tree / spec.runner_binary.name).resolve()
+
+        if not str(target_path).startswith(str(harness_tree)):
+            raise SecurityViolation("Target binary escapes designated harness tree")
+
+        run_id = f"cell_docker_{uuid.uuid4().hex[:8]}"
+        cell_dir = workspace_root / run_id
+        cell_dir.mkdir(parents=True, exist_ok=True)
+
+        params_file = cell_dir / "params.json"
+        out_file = cell_dir / "out.json"
+        params_file.write_text(json.dumps(validated_params), encoding="utf-8")
+
+        docker_cmd = [
+            self.docker_bin,
+            "run",
+            "--rm",
+            "--network=none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            f"--memory={self.memory_limit}",
+            f"--pids-limit={self.pids_limit}",
+            f"--cpus={self.cpus}",
+            "-v", f"{cell_dir}:/workspace:rw",
+            "-v", f"{harness_tree}:/harnesses:ro",
+            "-w", "/workspace",
+        ]
+
+        if extra_env:
+            for k, v in extra_env.items():
+                docker_cmd.extend(["-e", f"{k}={v}"])
+
+        docker_cmd.extend([
+            self.image,
+            "python3",
+            f"/harnesses/{target_path.name}",
+            "--params", "/workspace/params.json",
+            "--out", "/workspace/out.json",
+        ])
+
+        start_time = time.monotonic()
+        timed_out = False
+        exit_code = 0
+        stdout_raw = ""
+        stderr_raw = ""
+
+        try:
+            proc = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(0.1, budget_ms / 1000.0),
+            )
+            exit_code = proc.returncode
+            stdout_raw = (proc.stdout or "")[:MAX_STDIO_BYTES]
+            stderr_raw = (proc.stderr or "")[:MAX_STDIO_BYTES]
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            exit_code = 124
+            stdout_raw = (exc.stdout.decode() if isinstance(exc.stdout, bytes) else str(exc.stdout or ""))[:MAX_STDIO_BYTES]
+            stderr_raw = (exc.stderr.decode() if isinstance(exc.stderr, bytes) else str(exc.stderr or ""))[:MAX_STDIO_BYTES]
+        except FileNotFoundError:
+            if require_isolation:
+                raise SecurityViolation("Docker binary not found under required isolation")
+            exit_code = 127
+            stderr_raw = "Docker binary unavailable"
+        finally:
+            elapsed_ms = int((time.monotonic() - start_time) * 1000)
+
+        observables: dict[str, Any] = {}
+        if out_file.exists():
+            try:
+                raw_out = json.loads(out_file.read_text(encoding="utf-8"))
+                observables = raw_out.get("probes", {})
+            except Exception:
+                pass
+
+        if timed_out:
+            observables["timeout"] = True
+
+        shutil.rmtree(cell_dir, ignore_errors=True)
+
+        import hashlib
+        stdout_hash = hashlib.sha256(stdout_raw.encode("utf-8", errors="replace")).hexdigest()
+        stderr_hash = hashlib.sha256(stderr_raw.encode("utf-8", errors="replace")).hexdigest()
+
+        return RawTrace(
+            exit_code=exit_code,
+            wall_ms=elapsed_ms,
+            probes=observables,
+            stdout_hash=stdout_hash,
+            stderr_hash=stderr_hash,
+            signal=None,
+            max_rss_kb=0,
+            isolation={
+                "backend": "docker",
+                "container_image": self.image,
+                "network_isolated": True,
+                "capabilities_dropped": True,
+                "available": available,
+            },
+        )
+
+
+def execute_in_cell(
+    spec: HarnessSpec,
+    validated_params: dict[str, Any],
+    budget_ms: int,
+    workspace_root: Path,
+    harness_tree: Path,
+    pass_fds: tuple[int, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
+    require_isolation: bool = False,
+    backend: CellBackend | str | None = None,
+) -> RawTrace:
+    """Dispatches execution to a configured CellBackend (defaults to HostLandlockBackend)."""
+    if backend is None:
+        env_backend = os.environ.get("WARDEN_BACKEND", "host").lower()
+        if env_backend == "docker":
+            selected_backend: CellBackend = DockerCellBackend()
+        else:
+            selected_backend = HostLandlockBackend()
+    elif isinstance(backend, str):
+        if backend.lower() == "docker":
+            selected_backend = DockerCellBackend()
+        elif backend.lower() in ("host", "landlock"):
+            selected_backend = HostLandlockBackend()
+        else:
+            raise ValueError(f"Unknown cell backend name: {backend}")
+    else:
+        selected_backend = backend
+
+    return selected_backend.execute(
+        spec=spec,
+        validated_params=validated_params,
+        budget_ms=budget_ms,
+        workspace_root=workspace_root,
+        harness_tree=harness_tree,
+        pass_fds=pass_fds,
+        extra_env=extra_env,
+        require_isolation=require_isolation,
     )
