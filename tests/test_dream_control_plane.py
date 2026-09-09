@@ -140,6 +140,29 @@ class TestDreamControlPlane(unittest.TestCase):
         self.assertEqual(plan["mode"], "cold_uniform")
         self.assertEqual(plan["harness_id"], "fuzz_gate")
 
+    def test_signature_corpus_novelty_decay_formula(self):
+        from core.dream_evaluator import SignatureCorpus
+        corpus = SignatureCorpus()
+        harness = "admission_gate_policy"
+        sig_a = "sig_nominal_001"
+        sig_b = "sig_anomaly_002"
+
+        # Baseline empty corpus: m=0, |C|=0 -> N = 1.0 - 0/1 = 1.0
+        self.assertAlmostEqual(corpus.get_novelty(harness, sig_a), 1.0)
+
+        # Record 10 instances of sig_a
+        for _ in range(10):
+            corpus.record(harness, sig_a)
+
+        # Total history |C|=10, matches for sig_a m=10
+        # Expected N = 1.0 - (10 / (1.0 + 10)) = 1.0 - (10/11) = 1/11 ~= 0.0909
+        expected_decay = 1.0 - (10.0 / 11.0)
+        self.assertAlmostEqual(corpus.get_novelty(harness, sig_a), expected_decay, places=4)
+
+        # Fresh signature sig_b against |C|=10, m=0 -> N = 1.0 - 0/11 = 1.0
+        self.assertAlmostEqual(corpus.get_novelty(harness, sig_b), 1.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
