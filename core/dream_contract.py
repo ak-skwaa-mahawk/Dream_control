@@ -1,6 +1,8 @@
-HARD_MAX_BUDGET_MS: int = 5000
 #!/usr/bin/env python3
 """
+
+HARD_MAX_BUDGET_MS: int = 5000
+
 core/dream_contract.py
 Immutable data structures and strict typing definitions for Dream_control.
 """

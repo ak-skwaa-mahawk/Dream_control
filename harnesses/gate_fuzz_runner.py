@@ -114,20 +114,24 @@ def evaluate_admission_policy_fallback(
     return probes
 
 
-def load_charter_pinned() -> dict:
+def load_charter_pinned(allow_default: bool = True) -> dict | None:
     charter_fd_env = os.environ.get("ADMISSION_GATE_CHARTER_FD")
     if charter_fd_env and charter_fd_env.isdigit():
         fd = int(charter_fd_env)
         try:
             with open(fd, "r", encoding="utf-8", closefd=False) as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
         except Exception:
             pass
 
-    return {
-        "prohibited_resource_patterns": [r"^/etc/.*", r"^/root/.*"],
-        "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
-    }
+    if allow_default:
+        return {
+            "prohibited_resource_patterns": [r"^/etc/.*", r"^/root/.*"],
+            "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
+        }
+    return None
 
 
 def main():
@@ -146,13 +150,14 @@ def main():
     action_type = str(params.get("action_type", ""))
     sock_path = params.get("sock_path")
 
-    # Primary path: query live socket if accessible
     probes = query_gate_socket(target_path, action_type)
-
-    # Fallback path: evaluate pinned charter
     if probes is None:
-        charter = load_charter_pinned()
-        probes = evaluate_admission_policy_fallback(target_path, action_type, charter)
+        charter = load_charter_pinned(allow_default=False)
+        if charter is not None:
+            probes = evaluate_admission_policy_fallback(target_path, action_type, charter)
+        else:
+            sys.stderr.write("FATAL: neither ADMISSION_GATE_SOCK_FD nor ADMISSION_GATE_CHARTER_FD available\n")
+            sys.exit(2)
 
     output = {
         "status": "ok",

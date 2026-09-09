@@ -179,18 +179,9 @@ class DreamDaemon:
 
         sig0 = compute_signature(traces[0])
         novelty = self.corpus.get_novelty(exp.harness_id, sig0)
-        verdict = evaluate_traces(exp, traces, novelty=novelty)
+        verdict = evaluate_traces(exp, traces, novelty=novelty, require_isolation=self.require_isolation)
 
-        # In strict isolation mode, downgrade decision if isolation wasn't established
-        if self.require_isolation and not any(t.isolation.get("unshare") for t in traces):
-            logger.warning("Rejecting candidate: execution was unconfined (unshare unavailable)")
-            verdict = Verdict(
-                decision="discard",
-                score=0.0,
-                novelty=0.0,
-                reasons=("unconfined_execution",),
-                signature=sig0,
-            )
+        # Isolation enforced directly inside evaluate_traces
 
         self.corpus.record(exp.harness_id, sig0)
         self._save_corpus()

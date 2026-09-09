@@ -46,6 +46,7 @@ def evaluate_traces(
     traces: Sequence[RawTrace],
     novelty: float,
     tau: float = 2.0,
+    require_isolation: bool = False,
 ) -> Verdict:
     if not traces:
         raise ValueError("Must supply at least one trace for evaluation.")
@@ -65,10 +66,16 @@ def evaluate_traces(
     score = (1.0 if match else 0.0) + (2.0 if surprise else 0.0) + novelty
     reproduced = all(compute_signature(t) == sig0 for t in traces)
 
-    if score < tau:
+    reasons = []
+    if require_isolation and not all(t.isolation.get("unshare") and t.isolation.get("landlock") for t in traces):
+        decision = "discard"
+        score = 0.0
+        reasons.append("isolation_requirement_unmet")
+    elif score < tau:
         decision = "discard"
     elif reproduced:
         decision = "promote_candidate"
+        reasons.append("novel_behavior_reproduced")
     else:
         decision = "flaky"
 
@@ -79,4 +86,5 @@ def evaluate_traces(
         novelty=novelty,
         signature=sig0,
         decision=decision,
+        reasons=tuple(reasons),
     )
