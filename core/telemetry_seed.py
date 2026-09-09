@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-# Default path assuming repositories sit side-by-side in home directory
 DEFAULT_LOG_PATH = Path.home() / "sovereign-manifold" / "logs"
 
 ANOMALY_PATTERNS = [
@@ -23,7 +22,6 @@ ANOMALY_PATTERNS = [
 
 
 def extract_log_seeds(log_dir: Path = DEFAULT_LOG_PATH, max_seeds: int = 50) -> list[dict[str, Any]]:
-    """Scans log files for invariant warnings or anomalies to seed hypotheses."""
     seeds: list[dict[str, Any]] = []
     if not log_dir.is_dir():
         return seeds
