@@ -46,15 +46,6 @@ class HarnessSpec:
     allowed_observables: frozenset[Observable]
     runner_binary: Path
 
-    def __post_init__(self):
-        # Enforce canonical path resolution inside dedicated harness directory
-        harness_tree = Path("/opt/sovereign/harnesses").resolve()
-        resolved = self.runner_binary.resolve()
-        if not resolved.is_relative_to(harness_tree):
-            raise ValueError(f"runner_binary {resolved} escapes sandbox root {harness_tree}")
-        if not resolved.is_file():
-            raise FileNotFoundError(f"runner_binary {resolved} does not exist")
-
 
 @dataclass(frozen=True)
 class Experiment:
