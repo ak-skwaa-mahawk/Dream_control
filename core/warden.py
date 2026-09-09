@@ -2,7 +2,7 @@
 """
 core/warden.py
 Sandboxed harness runner with POSIX timeouts, cgroup v2 accounting/limits,
-Linux namespace isolation (unshare), Landlock/seccomp sandboxing where available,
+Linux namespace isolation (unshare), structured isolation telemetry,
 and probe allowlisting.
 """
 
@@ -24,7 +24,6 @@ DEFAULT_CGROUP2_ROOT = Path("/sys/fs/cgroup")
 
 
 def _try_setup_cgroup(cell_id: str, mem_max: int = DEFAULT_MEM_MAX_BYTES) -> tuple[Path | None, bool]:
-    """Attempt to create an isolated cgroup v2 for CPU and memory boundaries."""
     if not DEFAULT_CGROUP2_ROOT.is_dir():
         return None, False
 
@@ -94,14 +93,19 @@ def execute_in_cell(
     else:
         base_cmd = [str(resolved_binary), "--params", str(params_path), "--out", str(out_path)]
 
-    # Attempt namespace isolation wrapping via bwrap or unshare if installed and enabled
     cmd = list(base_cmd)
+    isolation_audit = {
+        "unshare": False,
+        "cgroup": False,
+        "session": True,
+    }
+
     unshare_bin = "/usr/bin/unshare"
     if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
-        # Gracefully probe whether unprivileged unshare is allowed
         probe = subprocess.run([unshare_bin, "-r", "--pid", "true"], capture_output=True)
         if probe.returncode == 0:
             cmd = [unshare_bin, "-r", "--pid", "--mount-proc", "--net", "--ipc"] + base_cmd
+            isolation_audit["unshare"] = True
 
     clean_env = {
         "PATH": "/usr/bin:/bin",
@@ -111,6 +115,7 @@ def execute_in_cell(
     }
 
     cg_path, has_cg = _try_setup_cgroup(run_id)
+    isolation_audit["cgroup"] = has_cg
 
     def _preexec_init():
         if has_cg and cg_path:
@@ -198,4 +203,5 @@ def execute_in_cell(
         stderr_hash=stderr_hash,
         signal=signal_num,
         max_rss_kb=max_rss_kb,
+        isolation=isolation_audit,
     )

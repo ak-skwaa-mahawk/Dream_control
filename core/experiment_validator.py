@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 core/experiment_validator.py
-Validates raw experiment parameter mappings against HarnessSpec bounds and types.
+Validates raw experiment parameter mappings against HarnessSpec bounds and strict types.
 """
 
 from typing import Any
@@ -31,13 +31,23 @@ def decode_params(spec: HarnessSpec, raw: dict) -> dict[str, Any]:
                     f"parameter '{name}' length {len(val)} out of bounds [{ps.lo}, {ps.hi}]"
                 )
             out[name] = val
-        else:
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
-                raise ParameterValidationError(f"parameter '{name}' is not numeric")
+        elif ps.kind == "int":
+            # Strict int check: reject bools, floats, and numeric strings
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise ParameterValidationError(f"parameter '{name}' must be strict int, got {type(val).__name__}")
             if not (ps.lo <= val <= ps.hi):
                 raise ParameterValidationError(
                     f"parameter '{name}' value {val} out of bounds [{ps.lo}, {ps.hi}]"
                 )
-            out[name] = int(val) if ps.kind == "int" else float(val)
+            out[name] = val
+        elif ps.kind == "float":
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise ParameterValidationError(f"parameter '{name}' must be numeric")
+            val_f = float(val)
+            if not (ps.lo <= val_f <= ps.hi):
+                raise ParameterValidationError(
+                    f"parameter '{name}' value {val_f} out of bounds [{ps.lo}, {ps.hi}]"
+                )
+            out[name] = val_f
 
     return out

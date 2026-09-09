@@ -52,6 +52,7 @@ class RawTrace:
     stderr_hash: str
     signal: int | None = None
     max_rss_kb: int = 0
+    isolation: Mapping[str, bool] = frozenset()
 
 
 @dataclass(frozen=True)

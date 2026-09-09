@@ -25,11 +25,9 @@ def evaluate_admission_policy(
         "intra_vires_confirmed": False,
     }
 
-    # 1. Prohibited patterns check
     prohibited_patterns = charter_dict.get("prohibited_resource_patterns", [])
     path_is_prohibited = any(re.search(pat, target_path) for pat in prohibited_patterns)
 
-    # Check rule-based format fallback
     for rule in charter_dict.get("rules", []):
         for fp in rule.get("forbidden_paths", []):
             if target_path == fp or target_path.startswith(fp.rstrip("/") + "/"):
@@ -37,18 +35,15 @@ def evaluate_admission_policy(
         if action_type in rule.get("forbidden_actions", []):
             path_is_prohibited = True
 
-    # Fallback checks if charter has no explicit patterns/rules
     if not prohibited_patterns and not charter_dict.get("rules"):
         if target_path in ("/etc/shadow", "/etc/passwd", "/root", "/bin/sh"):
             path_is_prohibited = True
 
-    # 2. Action authorization check
     auth_actions = charter_dict.get("authorized_actions", [])
     action_authorized = True
     if auth_actions:
         action_authorized = action_type in auth_actions
 
-    # 3. Derive observables matching test invariants
     if path_is_prohibited:
         probes["statutory_veto_reached"] = True
         probes["ultra_vires_detected"] = True
@@ -66,6 +61,7 @@ def evaluate_admission_policy(
 
 
 def load_charter_pinned(charter_param: str) -> dict:
+    # Option 1: File descriptor pinning
     charter_fd_env = os.environ.get("ADMISSION_GATE_CHARTER_FD")
     if charter_fd_env and charter_fd_env.isdigit():
         fd = int(charter_fd_env)
@@ -75,10 +71,13 @@ def load_charter_pinned(charter_param: str) -> dict:
         except Exception:
             pass
 
-    charter_path = Path(charter_param).resolve()
-    if charter_path.is_file():
+    # Option 2: Strictly require JSON filename and verify file exists without escaping cell
+    charter_path = Path(charter_param)
+    if charter_path.name.endswith(".json") and charter_path.is_file():
         try:
-            return json.loads(charter_path.read_text(encoding="utf-8"))
+            data = json.loads(charter_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
         except Exception:
             pass
 

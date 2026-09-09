@@ -152,7 +152,7 @@ def main():
         workspace_root=args.workspace,
         seed_bank_path=args.data_dir / "seeds.json",
         llm_callable=compiler,
-        harness_tree=PROJECT_ROOT,
+        harness_tree=PROJECT_ROOT / "harnesses",
         corpus_path=args.data_dir / "corpus.json",
         flaky_bank_path=args.data_dir / "flaky_seeds.json",
         log_dir=args.log_dir if args.log_dir.is_dir() else None,

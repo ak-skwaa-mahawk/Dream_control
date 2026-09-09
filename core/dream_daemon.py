@@ -2,7 +2,7 @@
 """
 core/dream_daemon.py
 Autonomous idle runner with K>=3 replication, flaky seed quarantine,
-and persistent signature corpus tracking.
+persistent signature corpus tracking, and hot-path parameter validation.
 """
 
 import time
@@ -16,12 +16,31 @@ from core.dream_scheduler import schedule_next_dream
 from core.dreamer import generate_experiment
 from core.warden import execute_in_cell
 from core.dream_evaluator import SignatureCorpus, evaluate_traces, compute_signature
+from core.experiment_validator import decode_params
 from core.telemetry_seed import collect_all_seeds, extract_log_seeds, write_seed_bank
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("dream_daemon")
 
 DEFAULT_K_REPLICATES = 3
+
+
+def derive_expected_observable(spec: HarnessSpec) -> str:
+    """Canonical observable selection per harness to prevent RNG claim divergence."""
+    if spec.harness_id == "admission_gate_policy":
+        return "statutory_veto_reached"
+    if spec.harness_id == "process_fuzzer":
+        return "admission_timeout"
+    return next(iter(spec.allowed_observables)) if spec.allowed_observables else "timeout"
+
+
+def compute_experiment_budget_ms(spec: HarnessSpec, params: Mapping[str, Any]) -> int:
+    """Derives execution ceiling avoiding false-positive 124 exits under high concurrency."""
+    if spec.harness_id == "process_fuzzer":
+        concurrency = int(params.get("concurrency", 1))
+        timeout_s = float(params.get("timeout_s", 0.05))
+        return min(10000, int(500 + (concurrency * timeout_s * 1000) * 1.5))
+    return 2000
 
 
 class DreamDaemon:
@@ -89,7 +108,6 @@ class DreamDaemon:
             audit_f = self.audit_path or Path("/nonexistent/audit.jsonl")
             outliers = collect_all_seeds(log_dir=log_d, audit_path=audit_f)
 
-        # Include both promoted and quarantined flaky seeds in mutation candidacy
         mutation_candidates = self.promoted_seeds + self.flaky_seeds
         plan = schedule_next_dream(mutation_candidates, self.catalog, outliers)
         mode = plan["mode"]
@@ -105,13 +123,21 @@ class DreamDaemon:
         else:
             hid = plan["harness_id"]
             spec = self.catalog[hid]
+            try:
+                # Always re-validate parameters on hot-path
+                validated = decode_params(spec, plan["parameters"])
+            except Exception as e:
+                logger.warning(f"Hot-path parameter validation failed: {e}")
+                return None
+
+            budget = compute_experiment_budget_ms(spec, validated)
             exp = Experiment(
                 dream_id=f"dream_{int(time.time()*1000)}",
                 harness_id=hid,
-                parameters=plan["parameters"],
-                expected=next(iter(spec.allowed_observables)) if spec.allowed_observables else "timeout",
+                parameters=validated,
+                expected=derive_expected_observable(spec),
                 unexpected=("panic",),
-                budget_ms=1000,
+                budget_ms=budget,
             )
 
         spec = self.catalog[exp.harness_id]
@@ -131,7 +157,6 @@ class DreamDaemon:
         novelty = self.corpus.get_novelty(exp.harness_id, sig0)
         verdict = evaluate_traces(exp, traces, novelty=novelty)
 
-        # Record every evaluated signature to update novelty counts
         self.corpus.record(exp.harness_id, sig0)
         self._save_corpus()
 
@@ -150,7 +175,6 @@ class DreamDaemon:
         }
 
         if verdict.decision == "promote_candidate":
-            # Deduplicate by (harness_id, signature)
             existing = {(s["harness_id"], s["signature"]) for s in self.promoted_seeds}
             if (entry["harness_id"], entry["signature"]) not in existing:
                 self.promoted_seeds.append(entry)
