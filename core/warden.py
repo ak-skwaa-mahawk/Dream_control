@@ -1,3 +1,4 @@
+import base64
 #!/usr/bin/env python3
 """
 core/warden.py
@@ -609,6 +610,37 @@ class DockerCellBackend:
         out_file = cell_dir / "out.json"
         params_file.write_text(json.dumps(validated_params), encoding="utf-8")
 
+        # Translate file descriptor inheritance into container-safe inline payload
+        container_env = dict(extra_env or {})
+        charter_fd_str = container_env.pop("ADMISSION_GATE_CHARTER_FD", None)
+        if charter_fd_str and charter_fd_str.isdigit() and "ADMISSION_GATE_CHARTER_PAYLOAD" not in container_env:
+            try:
+                fd = int(charter_fd_str)
+                # Read from host fd without closing it
+                with open(fd, "r", encoding="utf-8", closefd=False) as f:
+                    pos = f.tell() if f.seekable() else 0
+                    if f.seekable():
+                        f.seek(0)
+                    raw_data = f.read()
+                    if f.seekable():
+                        f.seek(pos)
+                    b64_payload = base64.b64encode(raw_data.encode("utf-8")).decode("ascii")
+                    container_env["ADMISSION_GATE_CHARTER_PAYLOAD"] = b64_payload
+            except Exception:
+                pass
+        elif pass_fds and "ADMISSION_GATE_CHARTER_PAYLOAD" not in container_env:
+            for fd in pass_fds:
+                try:
+                    with open(fd, "r", encoding="utf-8", closefd=False) as f:
+                        if f.seekable():
+                            f.seek(0)
+                        raw_data = f.read()
+                        b64_payload = base64.b64encode(raw_data.encode("utf-8")).decode("ascii")
+                        container_env["ADMISSION_GATE_CHARTER_PAYLOAD"] = b64_payload
+                        break
+                except Exception:
+                    continue
+
         docker_cmd = [
             self.docker_bin,
             "run",
@@ -624,9 +656,8 @@ class DockerCellBackend:
             "-w", "/workspace",
         ]
 
-        if extra_env:
-            for k, v in extra_env.items():
-                docker_cmd.extend(["-e", f"{k}={v}"])
+        for k, v in container_env.items():
+            docker_cmd.extend(["-e", f"{k}={v}"])
 
         docker_cmd.extend([
             self.image,

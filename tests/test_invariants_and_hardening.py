@@ -239,5 +239,59 @@ class TestInvariantsAndHardening(unittest.TestCase):
             else:
                 os.environ["ADMISSION_GATE_CHARTER_PAYLOAD"] = old_val
 
+
+    def test_docker_backend_translates_charter_fd_to_inline_payload(self):
+        import base64
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        backend = DockerCellBackend()
+        charter_content = json.dumps({"authorized_actions": ["SHELL_EXEC"]})
+        
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8") as f:
+            f.write(charter_content)
+            f.flush()
+            f.seek(0)
+            fd = f.fileno()
+
+            captured_cmds = []
+
+            def mock_run(cmd, *args, **kwargs):
+                captured_cmds.append(cmd)
+                class Result:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+                return Result()
+
+            spec = HarnessSpec(
+                harness_id="test_runner",
+                target_subsystem="core",
+                params={},
+                allowed_observables=frozenset(),
+                runner_binary=Path("/bin/true"),
+            )
+
+            with patch("shutil.which", return_value="/bin/docker"), \
+                 patch("subprocess.run", side_effect=mock_run):
+                backend.execute(
+                    spec=spec,
+                    validated_params={},
+                    budget_ms=500,
+                    workspace_root=Path(tempfile.gettempdir()),
+                    harness_tree=Path("/bin"),
+                    pass_fds=(fd,),
+                    extra_env={"ADMISSION_GATE_CHARTER_FD": str(fd)},
+                )
+
+            run_cmd = [c for c in captured_cmds if "run" in c][0]
+            payload_args = [arg for arg in run_cmd if arg.startswith("ADMISSION_GATE_CHARTER_PAYLOAD=")]
+            self.assertTrue(len(payload_args) > 0)
+            encoded = payload_args[0].split("=", 1)[1]
+            decoded = json.loads(base64.b64decode(encoded.encode("ascii")).decode("utf-8"))
+            self.assertEqual(decoded.get("authorized_actions"), ["SHELL_EXEC"])
+            self.assertFalse(any(arg.startswith("ADMISSION_GATE_CHARTER_FD=") for arg in run_cmd))
+
 if __name__ == "__main__":
     unittest.main()
