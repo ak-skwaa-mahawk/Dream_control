@@ -2,7 +2,7 @@
 """
 core/warden.py
 Hermetic harness runner with POSIX timeouts, cgroup v2 accounting/limits,
-Linux mount/PID namespace containment, Landlock ABI filesystem restrictions,
+Linux mount/PID namespace containment (--fork), attested Landlock ABI restrictions,
 non-blocking stream drain, and probe allowlisting.
 """
 
@@ -53,6 +53,16 @@ ACCESS_FS_RW = (
     | ACCESS_FS_MAKE_REG
 )
 
+# Handled actions cover all FS interactions; ungranted bits are denied
+ALL_HANDLED_FS = (
+    ACCESS_FS_RW
+    | ACCESS_FS_MAKE_CHAR
+    | ACCESS_FS_MAKE_BLOCK
+    | ACCESS_FS_MAKE_FIFO
+    | ACCESS_FS_MAKE_SOCK
+    | ACCESS_FS_MAKE_SYM
+)
+
 
 class LandlockRulesetAttr(ctypes.Structure):
     _fields_ = [("handled_access_fs", ctypes.c_uint64)]
@@ -66,20 +76,14 @@ class LandlockPathBeneathAttr(ctypes.Structure):
 
 
 def _get_syscall_numbers():
-    import platform
-    machine = platform.machine().lower()
-    if "aarch64" in machine or "arm64" in machine:
-        return 444, 445, 446
     return 444, 445, 446
 
 
 def _probe_landlock_safe() -> bool:
-    """Probes Landlock availability in a subprocess to avoid SIGSYS killing the parent."""
     probe_code = (
         "import ctypes\n"
         "try:\n"
         "    libc = ctypes.CDLL(None)\n"
-        "    # 444 is landlock_create_ruleset\n"
         "    res = libc.syscall(444, None, 0, 1)\n"
         "    exit(0 if res >= 1 else 1)\n"
         "except Exception:\n"
@@ -99,20 +103,20 @@ def _probe_landlock_safe() -> bool:
 HAS_LANDLOCK = _probe_landlock_safe()
 
 
-def _apply_landlock(run_dir: Path, harness_path: Path):
+def _apply_landlock(run_dir: Path, harness_path: Path) -> bool:
     if not HAS_LANDLOCK:
-        return
+        return False
 
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         sys_create_ruleset, sys_add_rule, sys_restrict_self = _get_syscall_numbers()
 
         attr = LandlockRulesetAttr()
-        attr.handled_access_fs = ACCESS_FS_RW
+        attr.handled_access_fs = ALL_HANDLED_FS
 
         ruleset_fd = libc.syscall(sys_create_ruleset, ctypes.byref(attr), ctypes.sizeof(attr), 0)
         if ruleset_fd < 0:
-            return
+            return False
 
         try:
             ro_paths = [
@@ -134,7 +138,8 @@ def _apply_landlock(run_dir: Path, harness_path: Path):
                     path_attr = LandlockPathBeneathAttr()
                     path_attr.allowed_access = ACCESS_FS_RO
                     path_attr.parent_fd = fd
-                    libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+                    if libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
+                        return False
                 finally:
                     os.close(fd)
 
@@ -143,16 +148,20 @@ def _apply_landlock(run_dir: Path, harness_path: Path):
                 path_attr = LandlockPathBeneathAttr()
                 path_attr.allowed_access = ACCESS_FS_RW
                 path_attr.parent_fd = rw_fd
-                libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+                if libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
+                    return False
             finally:
                 os.close(rw_fd)
 
-            if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0:
-                libc.syscall(sys_restrict_self, ruleset_fd, 0)
+            if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+                return False
+            if libc.syscall(sys_restrict_self, ruleset_fd, 0) != 0:
+                return False
+            return True
         finally:
             os.close(ruleset_fd)
     except Exception:
-        pass
+        return False
 
 
 def _try_setup_cgroup(cell_id: str, mem_max: int = DEFAULT_MEM_MAX_BYTES) -> tuple[Path | None, bool]:
@@ -187,7 +196,13 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
     if not cg_path:
         return
     try:
-        cg_path.rmdir()
+        # Give kernel brief grace period to decouple dying processes from cgroup
+        for _ in range(5):
+            try:
+                cg_path.rmdir()
+                break
+            except OSError:
+                time.sleep(0.01)
     except OSError:
         pass
 
@@ -280,15 +295,15 @@ def execute_in_cell(
     isolation_audit = {
         "unshare": False,
         "cgroup": False,
-        "landlock": bool(HAS_LANDLOCK),
+        "landlock": False,
         "session": True,
     }
 
     unshare_bin = "/usr/bin/unshare"
     if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
-        probe = subprocess.run([unshare_bin, "-r", "--pid", "true"], capture_output=True)
+        probe = subprocess.run([unshare_bin, "-r", "--fork", "--pid", "true"], capture_output=True)
         if probe.returncode == 0:
-            cmd = [unshare_bin, "-r", "--pid", "--mount-proc", "--net", "--ipc", "--mount"] + base_cmd
+            cmd = [unshare_bin, "-r", "--fork", "--pid", "--mount-proc", "--net", "--ipc", "--uts", "--mount"] + base_cmd
             isolation_audit["unshare"] = True
 
     clean_env = {
@@ -303,14 +318,28 @@ def execute_in_cell(
     cg_path, has_cg = _try_setup_cgroup(run_id)
     isolation_audit["cgroup"] = has_cg
 
+    # Inter-process status pipe to attest Landlock from preexec_fn
+    status_r, status_w = os.pipe()
+
     def _preexec_init():
-        if has_cg and cg_path:
+        try:
+            if has_cg and cg_path:
+                try:
+                    (cg_path / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
+                except OSError:
+                    pass
+
+            ll_ok = False
+            if HAS_LANDLOCK:
+                ll_ok = _apply_landlock(run_dir, resolved_binary)
+            os.write(status_w, b"1" if ll_ok else b"0")
+        except Exception:
+            os.write(status_w, b"0")
+        finally:
             try:
-                (cg_path / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
+                os.close(status_w)
             except OSError:
                 pass
-        if HAS_LANDLOCK:
-            _apply_landlock(run_dir, resolved_binary)
 
     timeout_sec = max(0.01, budget_ms / 1000.0)
     stdout_bytes = b""
@@ -330,8 +359,19 @@ def execute_in_cell(
             stderr=subprocess.PIPE,
             start_new_session=True,
             pass_fds=pass_fds,
-            preexec_fn=_preexec_init if (has_cg or HAS_LANDLOCK) else None,
+            preexec_fn=_preexec_init,
         )
+        os.close(status_w)
+
+        # Attest Landlock outcome
+        try:
+            status_data = os.read(status_r, 1)
+            isolation_audit["landlock"] = (status_data == b"1")
+        except OSError:
+            isolation_audit["landlock"] = False
+        finally:
+            os.close(status_r)
+
         stdout_bytes, stderr_bytes, timed_out = _read_bounded_pipes(proc, timeout_sec)
         if timed_out:
             try:
@@ -347,6 +387,10 @@ def execute_in_cell(
         else:
             exit_code = proc.wait()
     except Exception:
+        try:
+            os.close(status_r)
+        except OSError:
+            pass
         if proc:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)

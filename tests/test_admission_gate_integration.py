@@ -19,8 +19,6 @@ class TestAdmissionGateIntegration(unittest.TestCase):
             params={
                 "target_path": ParamSpec(kind="str", lo=1, hi=256),
                 "action_type": ParamSpec(kind="str", lo=1, hi=64),
-                "charter_path": ParamSpec(kind="str", lo=1, hi=512),
-                "sock_path": ParamSpec(kind="str", lo=1, hi=512),
             },
             allowed_observables=frozenset([
                 "statutory_veto_reached",
@@ -46,8 +44,6 @@ class TestAdmissionGateIntegration(unittest.TestCase):
                     validated_params={
                         "target_path": "/etc/shadow",
                         "action_type": "SHELL_EXEC",
-                        "charter_path": "charter.json",
-                        "sock_path": "/nonexistent.sock",
                     },
                     budget_ms=2000,
                     workspace_root=tmp_path / "workspace",
@@ -79,8 +75,6 @@ class TestAdmissionGateIntegration(unittest.TestCase):
                     validated_params={
                         "target_path": "/workspace/safe.txt",
                         "action_type": "SHELL_EXEC",
-                        "charter_path": "charter.json",
-                        "sock_path": "/nonexistent.sock",
                     },
                     budget_ms=2000,
                     workspace_root=tmp_path / "workspace",

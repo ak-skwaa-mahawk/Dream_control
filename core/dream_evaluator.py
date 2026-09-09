@@ -32,8 +32,6 @@ def compute_signature(t: RawTrace) -> str:
         "exit": t.exit_code,
         "signal": t.signal,
         "probes": dict(sorted(t.probes.items())),
-        "stdout_hash": t.stdout_hash,
-        "stderr_hash": t.stderr_hash,
     }
     return sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 

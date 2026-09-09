@@ -37,8 +37,6 @@ def build_default_catalog(harness_tree: Path) -> dict[str, HarnessSpec]:
             params={
                 "target_path": ParamSpec(kind="str", lo=1, hi=256),
                 "action_type": ParamSpec(kind="str", lo=1, hi=64),
-                "charter_path": ParamSpec(kind="str", lo=1, hi=512),
-                "sock_path": ParamSpec(kind="str", lo=1, hi=512),
             },
             allowed_observables=frozenset([
                 "statutory_veto_reached",
@@ -68,45 +66,23 @@ def build_default_catalog(harness_tree: Path) -> dict[str, HarnessSpec]:
 
 class StructuredInferenceCompiler:
     """
-    Two-phase constrained compiler. Queries a local or remote OpenAI-compatible API
-    with temperature variation, falling back to schema-synthesized mutations.
+    Mock inference adapter for autonomous dry-fire loops without live LLM endpoint.
+    Synthesizes hypotheses dynamically using prompt context or scheduled catalog cold picks.
     """
-    def __init__(self, endpoint: str | None = None, api_key: str | None = None, model: str = "default"):
-        self.endpoint = endpoint or os.environ.get("LLM_ENDPOINT")
-        self.api_key = api_key or os.environ.get("LLM_API_KEY", "EMPTY")
-        self.model = model or os.environ.get("LLM_MODEL", "gpt-3.5-turbo")
+    def __init__(self, endpoint: str | None = None):
+        self.endpoint = endpoint
 
     def __call__(self, prompt: str, temperature: float = 0.7) -> str:
-        if self.endpoint:
-            try:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                }
-                payload = {
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": temperature,
-                    "response_format": {"type": "json_object"} if temperature <= 0.3 else None,
-                }
-                req = urllib.request.Request(
-                    self.endpoint,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers=headers,
-                )
-                with urllib.request.urlopen(req, timeout=10.0) as resp:
-                    res_json = json.loads(resp.read().decode("utf-8"))
-                    content = res_json["choices"][0]["message"]["content"]
-                    return content
-            except Exception as e:
-                logger.warning(f"Inference endpoint call failed ({e}); using constrained fallback generator.")
+        import re
+        m_target = re.search(r"target_path[^a-zA-Z0-9_/.-]*([a-zA-Z0-9_/.-]+)", prompt)
+        m_action = re.search(r"action_type[^a-zA-Z0-9_]*([a-zA-Z0-9_]+)", prompt)
+        target = m_target.group(1) if m_target else "/sandbox/guest/target"
+        action = m_action.group(1) if m_action else "SHELL_READ"
 
-        # Constrained fallback generation respecting prompt phases
         if temperature > 0.5:
-            # Phase 1: High-entropy hypothesis
             return (
-                "Hypothesis: Stressing path boundary checks against /etc/passwd "
-                "with an unprivileged SHELL_READ should trigger statutory_veto_reached."
+                f"Hypothesis: Targeted boundary perturbation on {target} "
+                f"with action {action} should confirm statutory_veto_reached."
             )
         else:
             from core.dream_scheduler import dispatch_cold_uniform
@@ -120,7 +96,6 @@ class StructuredInferenceCompiler:
                 "expected": exp_obs,
             }
             return f"```json\n{json.dumps(sample, indent=2)}\n```"
-
 
 def main():
     parser = argparse.ArgumentParser(description="Dream_control Continuous Operational Daemon")
