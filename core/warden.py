@@ -141,6 +141,10 @@ def _apply_landlock(run_dir: Path, harness_path: Path) -> bool:
                 "/bin",
                 sys.prefix,
                 str(harness_path.resolve()),
+            "/proc",
+            "/dev/urandom",
+            "/dev/random",
+            "/dev/null",
             ]
             termux_prefix = os.environ.get("PREFIX")
             if termux_prefix and os.path.exists(termux_prefix):
@@ -190,6 +194,12 @@ def _try_setup_cgroup(cell_id: str, mem_max: int = DEFAULT_MEM_MAX_BYTES) -> tup
         max_file = cg_path / "memory.max"
         if max_file.exists():
             max_file.write_text(str(mem_max), encoding="utf-8")
+        pids_file = cg_path / "pids.max"
+        if pids_file.exists():
+            pids_file.write_text("64", encoding="utf-8")
+        cpu_file = cg_path / "cpu.max"
+        if cpu_file.exists():
+            cpu_file.write_text("50000 100000", encoding="utf-8")
         return cg_path, True
     except (OSError, PermissionError):
         return None, False
