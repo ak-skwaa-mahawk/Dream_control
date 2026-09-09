@@ -3,7 +3,7 @@
 core/warden.py
 Hermetic harness runner with POSIX timeouts, cgroup v2 accounting/limits,
 Linux mount/PID namespace containment (--fork), attested Landlock ABI restrictions,
-non-blocking stream drain, and probe allowlisting.
+strict env allowlisting, and probe filtering.
 """
 
 import os
@@ -14,6 +14,7 @@ import signal
 import select
 import hashlib
 import ctypes
+import platform
 import subprocess
 from pathlib import Path
 from typing import Mapping, Any
@@ -23,6 +24,12 @@ from core.dream_contract import HarnessSpec, RawTrace, SecurityViolation
 MAX_STDIO_BYTES = 64 * 1024
 DEFAULT_MEM_MAX_BYTES = 128 * 1024 * 1024  # 128MB ceiling
 DEFAULT_CGROUP2_ROOT = Path("/sys/fs/cgroup")
+HARD_MAX_BUDGET_MS = 5000  # Universal warden ceiling
+
+ALLOWED_EXTRA_ENV = frozenset([
+    "ADMISSION_GATE_CHARTER_FD",
+    "ADMISSION_GATE_SOCK_FD",
+])
 
 # Landlock ABI constants
 LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
@@ -53,7 +60,6 @@ ACCESS_FS_RW = (
     | ACCESS_FS_MAKE_REG
 )
 
-# Handled actions cover all FS interactions; ungranted bits are denied
 ALL_HANDLED_FS = (
     ACCESS_FS_RW
     | ACCESS_FS_MAKE_CHAR
@@ -75,16 +81,26 @@ class LandlockPathBeneathAttr(ctypes.Structure):
     ]
 
 
-def _get_syscall_numbers():
+def _get_landlock_syscall_numbers() -> tuple[int, int, int]:
+    m = platform.machine().lower()
+    if m in ("x86_64", "amd64"):
+        return 444, 445, 446
+    if m in ("aarch64", "arm64"):
+        return 444, 445, 446
+    if m.startswith("riscv"):
+        return 444, 445, 446
+    if m in ("i386", "i686"):
+        return 444, 445, 446
     return 444, 445, 446
 
 
 def _probe_landlock_safe() -> bool:
+    sys_create, _, _ = _get_landlock_syscall_numbers()
     probe_code = (
         "import ctypes\n"
         "try:\n"
         "    libc = ctypes.CDLL(None)\n"
-        "    res = libc.syscall(444, None, 0, 1)\n"
+        f"    res = libc.syscall({sys_create}, None, 0, 1)\n"
         "    exit(0 if res >= 1 else 1)\n"
         "except Exception:\n"
         "    exit(1)\n"
@@ -109,12 +125,12 @@ def _apply_landlock(run_dir: Path, harness_path: Path) -> bool:
 
     try:
         libc = ctypes.CDLL(None, use_errno=True)
-        sys_create_ruleset, sys_add_rule, sys_restrict_self = _get_syscall_numbers()
+        sys_create, sys_add, sys_restrict = _get_landlock_syscall_numbers()
 
         attr = LandlockRulesetAttr()
         attr.handled_access_fs = ALL_HANDLED_FS
 
-        ruleset_fd = libc.syscall(sys_create_ruleset, ctypes.byref(attr), ctypes.sizeof(attr), 0)
+        ruleset_fd = libc.syscall(sys_create, ctypes.byref(attr), ctypes.sizeof(attr), 0)
         if ruleset_fd < 0:
             return False
 
@@ -138,7 +154,7 @@ def _apply_landlock(run_dir: Path, harness_path: Path) -> bool:
                     path_attr = LandlockPathBeneathAttr()
                     path_attr.allowed_access = ACCESS_FS_RO
                     path_attr.parent_fd = fd
-                    if libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
+                    if libc.syscall(sys_add, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
                         return False
                 finally:
                     os.close(fd)
@@ -148,14 +164,14 @@ def _apply_landlock(run_dir: Path, harness_path: Path) -> bool:
                 path_attr = LandlockPathBeneathAttr()
                 path_attr.allowed_access = ACCESS_FS_RW
                 path_attr.parent_fd = rw_fd
-                if libc.syscall(sys_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
+                if libc.syscall(sys_add, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
                     return False
             finally:
                 os.close(rw_fd)
 
             if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
                 return False
-            if libc.syscall(sys_restrict_self, ruleset_fd, 0) != 0:
+            if libc.syscall(sys_restrict, ruleset_fd, 0) != 0:
                 return False
             return True
         finally:
@@ -196,7 +212,6 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
     if not cg_path:
         return
     try:
-        # Give kernel brief grace period to decouple dying processes from cgroup
         for _ in range(5):
             try:
                 cg_path.rmdir()
@@ -260,6 +275,7 @@ def execute_in_cell(
     harness_tree: Path,
     pass_fds: tuple[int, ...] = (),
     extra_env: Mapping[str, str] | None = None,
+    require_isolation: bool = False,
 ) -> RawTrace:
     resolved_binary = spec.runner_binary.resolve()
     resolved_tree = harness_tree.resolve()
@@ -270,6 +286,9 @@ def execute_in_cell(
         raise SecurityViolation(
             f"Security violation: binary {resolved_binary} outside harness tree {resolved_tree}"
         )
+
+    # Universal budget ceiling
+    effective_budget_ms = min(budget_ms, HARD_MAX_BUDGET_MS)
 
     workspace_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -300,11 +319,27 @@ def execute_in_cell(
     }
 
     unshare_bin = "/usr/bin/unshare"
+    has_unshare = False
     if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
         probe = subprocess.run([unshare_bin, "-r", "--fork", "--pid", "true"], capture_output=True)
         if probe.returncode == 0:
             cmd = [unshare_bin, "-r", "--fork", "--pid", "--mount-proc", "--net", "--ipc", "--uts", "--mount"] + base_cmd
+            has_unshare = True
             isolation_audit["unshare"] = True
+
+    cg_path, has_cg = _try_setup_cgroup(run_id)
+    isolation_audit["cgroup"] = has_cg
+
+    # Fail closed pre-launch if strict isolation is mandated
+    if require_isolation and not (has_unshare and HAS_LANDLOCK and has_cg):
+        try:
+            params_path.unlink(missing_ok=True)
+            out_path.unlink(missing_ok=True)
+            run_dir.rmdir()
+        except OSError:
+            pass
+        missing = [k for k, v in [("unshare", has_unshare), ("landlock", HAS_LANDLOCK), ("cgroup", has_cg)] if not v]
+        raise SecurityViolation(f"Host environment failed required isolation guarantees: {missing}")
 
     clean_env = {
         "PATH": "/usr/bin:/bin",
@@ -312,13 +347,12 @@ def execute_in_cell(
         "LC_ALL": "C.UTF-8",
         "PYTHONHASHSEED": "0",
     }
+    # Enforce strict extra_env allowlist
     if extra_env:
-        clean_env.update(extra_env)
+        for k, v in extra_env.items():
+            if k in ALLOWED_EXTRA_ENV:
+                clean_env[k] = v
 
-    cg_path, has_cg = _try_setup_cgroup(run_id)
-    isolation_audit["cgroup"] = has_cg
-
-    # Inter-process status pipe to attest Landlock from preexec_fn
     status_r, status_w = os.pipe()
 
     def _preexec_init():
@@ -341,7 +375,7 @@ def execute_in_cell(
             except OSError:
                 pass
 
-    timeout_sec = max(0.01, budget_ms / 1000.0)
+    timeout_sec = max(0.01, effective_budget_ms / 1000.0)
     stdout_bytes = b""
     stderr_bytes = b""
     exit_code: int | None = None
@@ -363,7 +397,6 @@ def execute_in_cell(
         )
         os.close(status_w)
 
-        # Attest Landlock outcome
         try:
             status_data = os.read(status_r, 1)
             isolation_audit["landlock"] = (status_data == b"1")

@@ -21,10 +21,15 @@ class SignatureCorpus:
         matches = sum(1 for s in history if s == sig0)
         return 1.0 - (matches / (1.0 + len(history)))
 
+    MAX_CORPUS_HISTORY = 200
+
     def record(self, harness_id: str, sig0: str) -> None:
         if harness_id not in self._corpus:
             self._corpus[harness_id] = []
-        self._corpus[harness_id].append(sig0)
+        history = self._corpus[harness_id]
+        history.append(sig0)
+        if len(history) > self.MAX_CORPUS_HISTORY:
+            self._corpus[harness_id] = history[-self.MAX_CORPUS_HISTORY:]
 
 
 def compute_signature(t: RawTrace) -> str:

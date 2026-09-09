@@ -85,7 +85,17 @@ def schedule_next_dream(
             delta = random.choice([-1, 1]) * max(1, int((ps.hi - ps.lo) * 0.05))
             mutated[t_key] = max(int(ps.lo), min(int(ps.hi), int(mutated.get(t_key, ps.lo)) + delta))
         elif ps.kind == "str":
-            mutated[t_key] = _generate_random_string(int(ps.lo), int(ps.hi))
+            old_val = str(mutated.get(t_key, ""))
+            if old_val and "/" in old_val:
+                segs = [s for s in old_val.split("/") if s]
+                if segs:
+                    idx = random.randrange(len(segs))
+                    segs[idx] = segs[idx] + "_mut"
+                    mutated[t_key] = "/" + "/".join(segs)
+                else:
+                    mutated[t_key] = _generate_random_string(int(ps.lo), int(ps.hi))
+            else:
+                mutated[t_key] = _generate_random_string(int(ps.lo), int(ps.hi))
         else:
             delta = random.choice([-1.0, 1.0]) * ((ps.hi - ps.lo) * 0.05)
             mutated[t_key] = round(max(ps.lo, min(ps.hi, float(mutated.get(t_key, ps.lo)) + delta)), 4)

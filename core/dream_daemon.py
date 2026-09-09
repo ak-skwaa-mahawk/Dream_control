@@ -167,6 +167,7 @@ class DreamDaemon:
                     harness_tree=self.harness_tree,
                     pass_fds=pass_fds,
                     extra_env=extra_env,
+                    require_isolation=self.require_isolation,
                 )
                 traces.append(trace)
         finally:
@@ -188,6 +189,7 @@ class DreamDaemon:
                 score=0.0,
                 novelty=0.0,
                 reasons=("unconfined_execution",),
+                signature=sig0,
             )
 
         self.corpus.record(exp.harness_id, sig0)
