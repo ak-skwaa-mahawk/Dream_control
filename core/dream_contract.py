@@ -4,7 +4,7 @@ core/dream_contract.py
 Immutable data structures and strict typing definitions for Dream_control.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Mapping, Any
 
@@ -52,7 +52,7 @@ class RawTrace:
     stderr_hash: str
     signal: int | None = None
     max_rss_kb: int = 0
-    isolation: Mapping[str, bool] = frozenset()
+    isolation: Mapping[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -81,7 +81,7 @@ class Experiment:
 
 @dataclass(frozen=True)
 class Verdict:
-    decision: Literal["promote_candidate", "discard", "quarantine", "flaky"]
+    decision: Literal["promote_candidate", "discard", "flaky"]
     score: float
     novelty: float
     reasons: tuple[str, ...] = ()

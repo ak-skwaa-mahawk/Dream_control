@@ -2,8 +2,8 @@
 """
 harnesses/gate_fuzz_runner.py
 Pinning adapter for the admission_gate policy engine.
-Consumes structured target parameters with descriptor pinning support
-and evaluates statutory veto, ultra vires, and intra vires policy states.
+Consumes policy data exclusively through pre-opened file descriptors,
+preventing arbitrary host file reads from cell parameters.
 """
 
 import os
@@ -12,6 +12,11 @@ import json
 import re
 import argparse
 from pathlib import Path
+
+IMMUTABLE_FALLBACK_CHARTER = {
+    "prohibited_resource_patterns": [r"^/etc/.*", r"^/root/.*"],
+    "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
+}
 
 
 def evaluate_admission_policy(
@@ -60,8 +65,8 @@ def evaluate_admission_policy(
     return probes
 
 
-def load_charter_pinned(charter_param: str) -> dict:
-    # Option 1: File descriptor pinning
+def load_charter_pinned() -> dict:
+    """Reads policy charter exclusively via inherited file descriptor."""
     charter_fd_env = os.environ.get("ADMISSION_GATE_CHARTER_FD")
     if charter_fd_env and charter_fd_env.isdigit():
         fd = int(charter_fd_env)
@@ -71,20 +76,7 @@ def load_charter_pinned(charter_param: str) -> dict:
         except Exception:
             pass
 
-    # Option 2: Strictly require JSON filename and verify file exists without escaping cell
-    charter_path = Path(charter_param)
-    if charter_path.name.endswith(".json") and charter_path.is_file():
-        try:
-            data = json.loads(charter_path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-
-    return {
-        "prohibited_resource_patterns": [r"^/etc/.*", r"^/root/.*"],
-        "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
-    }
+    return IMMUTABLE_FALLBACK_CHARTER
 
 
 def main():
@@ -101,9 +93,8 @@ def main():
 
     target_path = str(params.get("target_path", ""))
     action_type = str(params.get("action_type", ""))
-    charter_str = str(params.get("charter_path", "charter.json"))
 
-    charter = load_charter_pinned(charter_str)
+    charter = load_charter_pinned()
     probes = evaluate_admission_policy(target_path, action_type, charter)
 
     output = {

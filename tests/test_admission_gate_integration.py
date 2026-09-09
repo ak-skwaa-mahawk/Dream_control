@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
+import os
 import json
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
 
 from core.dream_contract import HarnessSpec, ParamSpec
@@ -9,9 +10,9 @@ from core.warden import execute_in_cell
 
 
 class TestAdmissionGateIntegration(unittest.TestCase):
-
     def setUp(self):
-        self.runner = Path("harnesses/gate_fuzz_runner.py").resolve()
+        self.root = Path(__file__).resolve().parent.parent
+        self.runner = self.root / "harnesses" / "gate_fuzz_runner.py"
         self.spec = HarnessSpec(
             harness_id="admission_gate_policy",
             target_subsystem="admission_gate",
@@ -38,18 +39,24 @@ class TestAdmissionGateIntegration(unittest.TestCase):
                 "authorized_actions": ["SHELL_EXEC"],
             }), encoding="utf-8")
 
-            trace = execute_in_cell(
-                spec=self.spec,
-                validated_params={
-                    "target_path": "/etc/shadow",
-                    "action_type": "SHELL_EXEC",
-                    "charter_path": str(charter_file),
-                    "sock_path": "/nonexistent.sock",
-                },
-                budget_ms=2000,
-                workspace_root=tmp_path / "workspace",
-                harness_tree=self.runner.parent.parent,
-            )
+            fd = os.open(str(charter_file), os.O_RDONLY)
+            try:
+                trace = execute_in_cell(
+                    spec=self.spec,
+                    validated_params={
+                        "target_path": "/etc/shadow",
+                        "action_type": "SHELL_EXEC",
+                        "charter_path": "charter.json",
+                        "sock_path": "/nonexistent.sock",
+                    },
+                    budget_ms=2000,
+                    workspace_root=tmp_path / "workspace",
+                    harness_tree=self.runner.parent,
+                    pass_fds=(fd,),
+                    extra_env={"ADMISSION_GATE_CHARTER_FD": str(fd)},
+                )
+            finally:
+                os.close(fd)
 
             self.assertEqual(trace.exit_code, 0)
             self.assertTrue(trace.probes.get("statutory_veto_reached"))
@@ -65,18 +72,24 @@ class TestAdmissionGateIntegration(unittest.TestCase):
                 "authorized_actions": ["SHELL_EXEC"],
             }), encoding="utf-8")
 
-            trace = execute_in_cell(
-                spec=self.spec,
-                validated_params={
-                    "target_path": "/var/log/app.log",
-                    "action_type": "SHELL_EXEC",
-                    "charter_path": str(charter_file),
-                    "sock_path": "/nonexistent.sock",
-                },
-                budget_ms=2000,
-                workspace_root=tmp_path / "workspace",
-                harness_tree=self.runner.parent.parent,
-            )
+            fd = os.open(str(charter_file), os.O_RDONLY)
+            try:
+                trace = execute_in_cell(
+                    spec=self.spec,
+                    validated_params={
+                        "target_path": "/workspace/safe.txt",
+                        "action_type": "SHELL_EXEC",
+                        "charter_path": "charter.json",
+                        "sock_path": "/nonexistent.sock",
+                    },
+                    budget_ms=2000,
+                    workspace_root=tmp_path / "workspace",
+                    harness_tree=self.runner.parent,
+                    pass_fds=(fd,),
+                    extra_env={"ADMISSION_GATE_CHARTER_FD": str(fd)},
+                )
+            finally:
+                os.close(fd)
 
             self.assertEqual(trace.exit_code, 0)
             self.assertFalse(trace.probes.get("statutory_veto_reached"))
@@ -85,4 +98,4 @@ class TestAdmissionGateIntegration(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

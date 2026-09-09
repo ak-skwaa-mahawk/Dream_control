@@ -109,16 +109,15 @@ class StructuredInferenceCompiler:
                 "with an unprivileged SHELL_READ should trigger statutory_veto_reached."
             )
         else:
-            # Phase 2: Low-temperature grammar-compliant JSON compilation
+            from core.dream_scheduler import dispatch_cold_uniform
+            cat = build_default_catalog(PROJECT_ROOT)
+            cold = dispatch_cold_uniform(cat)
+            hid = cold["harness_id"]
+            exp_obs = "statutory_veto_reached" if hid == "admission_gate_policy" else "admission_timeout"
             sample = {
-                "harness_id": "admission_gate_policy",
-                "parameters": {
-                    "target_path": "/etc/passwd",
-                    "action_type": "SHELL_READ",
-                    "charter_path": "charter.json",
-                    "sock_path": "/tmp/admission.sock",
-                },
-                "expected": "statutory_veto_reached",
+                "harness_id": hid,
+                "parameters": cold["parameters"],
+                "expected": exp_obs,
             }
             return f"```json\n{json.dumps(sample, indent=2)}\n```"
 

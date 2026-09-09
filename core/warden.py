@@ -2,7 +2,7 @@
 """
 core/warden.py
 Sandboxed harness runner with POSIX timeouts, cgroup v2 accounting/limits,
-Linux namespace isolation (unshare), structured isolation telemetry,
+Linux namespace isolation (unshare), bounded stream consumption,
 and probe allowlisting.
 """
 
@@ -11,6 +11,7 @@ import sys
 import time
 import json
 import signal
+import select
 import hashlib
 import subprocess
 from pathlib import Path
@@ -60,6 +61,55 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
         pass
 
 
+def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[bytes, bytes, bool]:
+    """Reads stdout and stderr up to MAX_STDIO_BYTES without loading unbounded streams into memory."""
+    stdout_buf = bytearray()
+    stderr_buf = bytearray()
+    t_start = time.perf_counter()
+
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe:
+            os.set_blocking(pipe.fileno(), False)
+
+    timed_out = False
+    while True:
+        elapsed = time.perf_counter() - t_start
+        remaining = timeout_sec - elapsed
+        if remaining <= 0:
+            timed_out = True
+            break
+
+        reads = [p for p in (proc.stdout, proc.stderr) if p and not p.closed]
+        if not reads:
+            break
+
+        rlist, _, _ = select.select(reads, [], [], min(remaining, 0.05))
+        for pipe in rlist:
+            chunk = pipe.read(4096)
+            if not chunk:
+                continue
+            if pipe is proc.stdout and len(stdout_buf) < MAX_STDIO_BYTES:
+                stdout_buf.extend(chunk[: MAX_STDIO_BYTES - len(stdout_buf)])
+            elif pipe is proc.stderr and len(stderr_buf) < MAX_STDIO_BYTES:
+                stderr_buf.extend(chunk[: MAX_STDIO_BYTES - len(stderr_buf)])
+
+        if proc.poll() is not None:
+            # Drain remaining data up to bounds
+            for pipe in reads:
+                try:
+                    chunk = pipe.read(4096)
+                    if chunk:
+                        if pipe is proc.stdout and len(stdout_buf) < MAX_STDIO_BYTES:
+                            stdout_buf.extend(chunk[: MAX_STDIO_BYTES - len(stdout_buf)])
+                        elif pipe is proc.stderr and len(stderr_buf) < MAX_STDIO_BYTES:
+                            stderr_buf.extend(chunk[: MAX_STDIO_BYTES - len(stderr_buf)])
+                except OSError:
+                    pass
+            break
+
+    return bytes(stdout_buf), bytes(stderr_buf), timed_out
+
+
 def execute_in_cell(
     spec: HarnessSpec,
     validated_params: Mapping[str, Any],
@@ -67,6 +117,7 @@ def execute_in_cell(
     workspace_root: Path,
     harness_tree: Path,
     pass_fds: tuple[int, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
 ) -> RawTrace:
     resolved_binary = spec.runner_binary.resolve()
     resolved_tree = harness_tree.resolve()
@@ -113,6 +164,8 @@ def execute_in_cell(
         "LC_ALL": "C.UTF-8",
         "PYTHONHASHSEED": "0",
     }
+    if extra_env:
+        clean_env.update(extra_env)
 
     cg_path, has_cg = _try_setup_cgroup(run_id)
     isolation_audit["cgroup"] = has_cg
@@ -143,27 +196,27 @@ def execute_in_cell(
             pass_fds=pass_fds,
             preexec_fn=_preexec_init if has_cg else None,
         )
-        stdout_raw, stderr_raw = proc.communicate(timeout=timeout_sec)
-        stdout_bytes = stdout_raw[:MAX_STDIO_BYTES]
-        stderr_bytes = stderr_raw[:MAX_STDIO_BYTES]
-        exit_code = proc.returncode
-    except subprocess.TimeoutExpired:
+        stdout_bytes, stderr_bytes, timed_out = _read_bounded_pipes(proc, timeout_sec)
+        if timed_out:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            exit_code = 124
+            signal_num = signal.SIGKILL
+        else:
+            exit_code = proc.poll()
+    except Exception:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
-            pass
-        try:
-            stdout_raw, stderr_raw = proc.communicate(timeout=1.0)
-            stdout_bytes = stdout_raw[:MAX_STDIO_BYTES]
-            stderr_bytes = stderr_raw[:MAX_STDIO_BYTES]
-        except Exception:
             pass
         exit_code = 124
         signal_num = signal.SIGKILL
     finally:
         wall_ms = int((time.perf_counter() - t_start) * 1000)
 
-    max_rss_kb = _read_cgroup_peak_kb(cg_path)
+    max_rss_kb = _read_cgroup_peak_kb(cg_path) if has_cg else 0
     _cleanup_cgroup(cg_path)
 
     if exit_code is not None and exit_code != 124:

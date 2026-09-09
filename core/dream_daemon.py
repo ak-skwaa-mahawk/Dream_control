@@ -2,9 +2,10 @@
 """
 core/dream_daemon.py
 Autonomous idle runner with K>=3 replication, flaky seed quarantine,
-persistent signature corpus tracking, and hot-path parameter validation.
+persistent signature corpus tracking, descriptor pinning, and hot-path validation.
 """
 
+import os
 import time
 import json
 import logging
@@ -26,7 +27,6 @@ DEFAULT_K_REPLICATES = 3
 
 
 def derive_expected_observable(spec: HarnessSpec) -> str:
-    """Canonical observable selection per harness to prevent RNG claim divergence."""
     if spec.harness_id == "admission_gate_policy":
         return "statutory_veto_reached"
     if spec.harness_id == "process_fuzzer":
@@ -35,7 +35,6 @@ def derive_expected_observable(spec: HarnessSpec) -> str:
 
 
 def compute_experiment_budget_ms(spec: HarnessSpec, params: Mapping[str, Any]) -> int:
-    """Derives execution ceiling avoiding false-positive 124 exits under high concurrency."""
     if spec.harness_id == "process_fuzzer":
         concurrency = int(params.get("concurrency", 1))
         timeout_s = float(params.get("timeout_s", 0.05))
@@ -55,7 +54,9 @@ class DreamDaemon:
         flaky_bank_path: Path | None = None,
         log_dir: Path | None = None,
         audit_path: Path | None = None,
+        charter_path: Path | None = None,
         k_replicates: int = DEFAULT_K_REPLICATES,
+        require_isolation: bool = False,
     ):
         self.catalog = catalog
         self.workspace_root = workspace_root
@@ -66,7 +67,9 @@ class DreamDaemon:
         self.harness_tree = harness_tree
         self.log_dir = log_dir
         self.audit_path = audit_path
+        self.charter_path = charter_path
         self.k_replicates = max(1, k_replicates)
+        self.require_isolation = require_isolation
 
         self.corpus = self._load_corpus()
         self.promoted_seeds: list[dict[str, Any]] = self._load_json_list(self.seed_bank_path)
@@ -124,7 +127,6 @@ class DreamDaemon:
             hid = plan["harness_id"]
             spec = self.catalog[hid]
             try:
-                # Always re-validate parameters on hot-path
                 validated = decode_params(spec, plan["parameters"])
             except Exception as e:
                 logger.warning(f"Hot-path parameter validation failed: {e}")
@@ -143,19 +145,50 @@ class DreamDaemon:
         spec = self.catalog[exp.harness_id]
         traces: list[RawTrace] = []
 
-        for _ in range(self.k_replicates):
-            trace = execute_in_cell(
-                spec=spec,
-                validated_params=dict(exp.parameters),
-                budget_ms=exp.budget_ms,
-                workspace_root=self.workspace_root,
-                harness_tree=self.harness_tree,
-            )
-            traces.append(trace)
+        # Open pinned charter FD if specified
+        charter_fd: int | None = None
+        pass_fds = ()
+        extra_env = {}
+        if self.charter_path and self.charter_path.is_file():
+            try:
+                charter_fd = os.open(str(self.charter_path), os.O_RDONLY)
+                pass_fds = (charter_fd,)
+                extra_env["ADMISSION_GATE_CHARTER_FD"] = str(charter_fd)
+            except OSError:
+                pass
+
+        try:
+            for _ in range(self.k_replicates):
+                trace = execute_in_cell(
+                    spec=spec,
+                    validated_params=dict(exp.parameters),
+                    budget_ms=exp.budget_ms,
+                    workspace_root=self.workspace_root,
+                    harness_tree=self.harness_tree,
+                    pass_fds=pass_fds,
+                    extra_env=extra_env,
+                )
+                traces.append(trace)
+        finally:
+            if charter_fd is not None:
+                try:
+                    os.close(charter_fd)
+                except OSError:
+                    pass
 
         sig0 = compute_signature(traces[0])
         novelty = self.corpus.get_novelty(exp.harness_id, sig0)
         verdict = evaluate_traces(exp, traces, novelty=novelty)
+
+        # In strict isolation mode, downgrade decision if isolation wasn't established
+        if self.require_isolation and not any(t.isolation.get("unshare") for t in traces):
+            logger.warning("Rejecting candidate: execution was unconfined (unshare unavailable)")
+            verdict = Verdict(
+                decision="discard",
+                score=0.0,
+                novelty=0.0,
+                reasons=("unconfined_execution",),
+            )
 
         self.corpus.record(exp.harness_id, sig0)
         self._save_corpus()

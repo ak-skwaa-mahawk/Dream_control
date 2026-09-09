@@ -48,12 +48,9 @@ class TestInvariantsAndHardening(unittest.TestCase):
                     harness_tree=harness_dir,
                 )
 
-    def test_charter_loader_rejects_non_json_files(self):
-        with tempfile.NamedTemporaryFile(suffix=".txt") as f:
-            f.write(b"not_json: foo: bar")
-            f.flush()
-            charter = load_charter_pinned(f.name)
-            self.assertIn("prohibited_resource_patterns", charter)
+    def test_charter_loader_defaults_without_descriptor(self):
+        charter = load_charter_pinned()
+        self.assertIn("prohibited_resource_patterns", charter)
 
     def test_trace_contains_isolation_audit(self):
         with tempfile.TemporaryDirectory() as tmp:
