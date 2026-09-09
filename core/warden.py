@@ -128,6 +128,10 @@ def execute_in_cell(
         )
 
     workspace_root.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(workspace_root, 0o700)
+    except OSError:
+        pass
     run_id = f"cell_{int(time.time() * 1e6)}_{os.getpid()}"
     run_dir = workspace_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +210,7 @@ def execute_in_cell(
             except subprocess.TimeoutExpired:
                 pass
             exit_code = 124
-            signal_num = signal.SIGKILL
+            signal_num = None
         else:
             exit_code = proc.wait()
     except Exception:

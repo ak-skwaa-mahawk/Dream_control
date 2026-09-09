@@ -132,6 +132,12 @@ def main():
     parser.add_argument("--audit-log", type=Path, default=Path.home() / "admission-gate" / "audit_log.jsonl")
     parser.add_argument("--log-dir", type=Path, default=Path.home() / "sovereign-manifold" / "logs")
     parser.add_argument("--llm-endpoint", type=str, default=None, help="OpenAI-compatible inference URL")
+    parser.add_argument(
+        "--allow-unconfined",
+        action="store_true",
+        default=False,
+        help="Permit unconfined execution if Linux namespaces/cgroups are unavailable",
+    )
     args = parser.parse_args()
 
     args.workspace.mkdir(parents=True, exist_ok=True)
@@ -157,6 +163,7 @@ def main():
         log_dir=args.log_dir if args.log_dir.is_dir() else None,
         audit_path=args.audit_log if args.audit_log.is_file() else None,
         k_replicates=args.k_replicates,
+        require_isolation=not args.allow_unconfined,
     )
 
     cycle_count = 0

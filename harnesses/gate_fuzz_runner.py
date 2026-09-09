@@ -20,25 +20,19 @@ SOCKET_TIMEOUT_SEC = 1.0
 def query_gate_socket(
     target_path: str,
     action_type: str,
-    sock_path: str | None = None,
 ) -> dict[str, bool] | None:
     """
-    Connects to the admission-gate UNIX domain socket via inherited descriptor
-    or socket path, transmits the admission query, and maps the response to observables.
+    Connects to the admission-gate UNIX domain socket strictly via inherited
+    file descriptor (ADMISSION_GATE_SOCK_FD), preventing arbitrary host socket traversal.
     """
     s = None
     sock_fd_env = os.environ.get("ADMISSION_GATE_SOCK_FD")
+    if not (sock_fd_env and sock_fd_env.isdigit()):
+        return None
 
     try:
-        if sock_fd_env and sock_fd_env.isdigit():
-            fd = int(sock_fd_env)
-            s = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
-        elif sock_path and os.path.exists(sock_path):
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(SOCKET_TIMEOUT_SEC)
-            s.connect(sock_path)
-        else:
-            return None
+        fd = int(sock_fd_env)
+        s = socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM)
 
         s.settimeout(SOCKET_TIMEOUT_SEC)
         request = {
@@ -153,7 +147,7 @@ def main():
     sock_path = params.get("sock_path")
 
     # Primary path: query live socket if accessible
-    probes = query_gate_socket(target_path, action_type, sock_path)
+    probes = query_gate_socket(target_path, action_type)
 
     # Fallback path: evaluate pinned charter
     if probes is None:

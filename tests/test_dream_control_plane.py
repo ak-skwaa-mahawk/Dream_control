@@ -142,3 +142,25 @@ class TestDreamControlPlane(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+    def test_timeout_does_not_infer_panic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            harness = tmp_p / "hang.py"
+            harness.write_text("import time; time.sleep(10)", encoding="utf-8")
+            spec = HarnessSpec(
+                harness_id="hang",
+                target_subsystem="test",
+                params={},
+                allowed_observables=frozenset(["timeout", "panic"]),
+                runner_binary=harness,
+            )
+            trace = execute_in_cell(spec, {}, 100, tmp_p / "ws", tmp_p)
+            self.assertEqual(trace.exit_code, 124)
+            self.assertIsNone(trace.signal)
+            from core.dream_evaluator import evaluate_traces
+            from core.dream_contract import Experiment
+            exp = Experiment("d1", "hang", {}, "timeout", ("panic",), 100)
+            verdict = evaluate_traces(exp, [trace], 1.0)
+            self.assertFalse(verdict.surprise)
+            self.assertTrue(verdict.match)
