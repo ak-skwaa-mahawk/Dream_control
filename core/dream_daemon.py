@@ -89,7 +89,9 @@ class DreamDaemon:
             audit_f = self.audit_path or Path("/nonexistent/audit.jsonl")
             outliers = collect_all_seeds(log_dir=log_d, audit_path=audit_f)
 
-        plan = schedule_next_dream(self.promoted_seeds, self.catalog, outliers)
+        # Include both promoted and quarantined flaky seeds in mutation candidacy
+        mutation_candidates = self.promoted_seeds + self.flaky_seeds
+        plan = schedule_next_dream(mutation_candidates, self.catalog, outliers)
         mode = plan["mode"]
         logger.info(f"Dispatching cycle with mode: {mode}")
 
@@ -129,6 +131,10 @@ class DreamDaemon:
         novelty = self.corpus.get_novelty(exp.harness_id, sig0)
         verdict = evaluate_traces(exp, traces, novelty=novelty)
 
+        # Record every evaluated signature to update novelty counts
+        self.corpus.record(exp.harness_id, sig0)
+        self._save_corpus()
+
         logger.info(
             f"Cycle completed: decision={verdict.decision} score={verdict.score:.2f} novelty={verdict.novelty:.2f}"
         )
@@ -144,13 +150,16 @@ class DreamDaemon:
         }
 
         if verdict.decision == "promote_candidate":
-            self.corpus.record(exp.harness_id, sig0)
-            self._save_corpus()
-            self.promoted_seeds.append(entry)
-            self._save_json_list(self.promoted_seeds, self.seed_bank_path)
+            # Deduplicate by (harness_id, signature)
+            existing = {(s["harness_id"], s["signature"]) for s in self.promoted_seeds}
+            if (entry["harness_id"], entry["signature"]) not in existing:
+                self.promoted_seeds.append(entry)
+                self._save_json_list(self.promoted_seeds, self.seed_bank_path)
         elif verdict.decision == "flaky":
-            self.flaky_seeds.append(entry)
-            self._save_json_list(self.flaky_seeds, self.flaky_bank_path)
+            existing_flaky = {(s["harness_id"], s["signature"]) for s in self.flaky_seeds}
+            if (entry["harness_id"], entry["signature"]) not in existing_flaky:
+                self.flaky_seeds.append(entry)
+                self._save_json_list(self.flaky_seeds, self.flaky_bank_path)
 
         return {
             "dream_id": exp.dream_id,

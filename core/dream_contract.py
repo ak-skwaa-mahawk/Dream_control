@@ -1,41 +1,37 @@
 #!/usr/bin/env python3
 """
 core/dream_contract.py
-Immutable contracts, typed observables, and frozen catalog structures.
+Immutable data structures and strict typing definitions for Dream_control.
 """
 
 from dataclasses import dataclass
-from hashlib import sha256
-import json
 from pathlib import Path
-from typing import Mapping, Literal
+from typing import Literal, Mapping, Any
 
 Observable = Literal[
+    "veto",
     "timeout",
-    "panic",
-    "veto_bypass",
-    "admission_timeout",
+    "intra_vires",
     "statutory_veto_reached",
+    "ultra_vires_detected",
+    "intra_vires_confirmed",
+    "admission_timeout",
+    "panic",
+    "drift",
     "cross_tenant_leak",
 ]
 
 
+class SecurityViolation(PermissionError):
+    """Raised when harness execution violates tree boundary or containment invariants."""
+    pass
+
+
 @dataclass(frozen=True)
 class ParamSpec:
-    kind: Literal["int", "float"]
+    kind: Literal["int", "float", "str"]
     lo: float
     hi: float
-
-
-@dataclass(frozen=True)
-class RawTrace:
-    exit_code: int | None
-    signal: int | None
-    wall_ms: int
-    max_rss_kb: int
-    stdout_sha256: str
-    stderr_sha256: str
-    probes: Mapping[str, bool]
 
 
 @dataclass(frozen=True)
@@ -48,36 +44,46 @@ class HarnessSpec:
 
 
 @dataclass(frozen=True)
+class RawTrace:
+    exit_code: int | None
+    wall_ms: int
+    probes: Mapping[str, bool]
+    stdout_hash: str
+    stderr_hash: str
+    signal: int | None = None
+    max_rss_kb: int = 0
+
+
+@dataclass(frozen=True)
 class Experiment:
     dream_id: str
     harness_id: str
-    parameters: Mapping[str, int | float]
+    parameters: Mapping[str, Any]
     expected: Observable
     unexpected: tuple[Observable, ...]
     budget_ms: int
 
     @property
     def experiment_hash(self) -> str:
-        body = json.dumps(
-            {
-                "harness_id": self.harness_id,
-                "parameters": dict(sorted(self.parameters.items())),
-                "expected": self.expected,
-            },
-            sort_keys=True,
-        )
-        return sha256(body.encode()).hexdigest()[:16]
+        import hashlib
+        import json
+        payload = {
+            "harness_id": self.harness_id,
+            "parameters": self.parameters,
+            "expected": self.expected,
+            "unexpected": sorted(list(self.unexpected)),
+            "budget_ms": self.budget_ms,
+        }
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
 class Verdict:
+    decision: Literal["promote_candidate", "discard", "quarantine", "flaky"]
     score: float
-    match: bool
-    surprise: bool
     novelty: float
-    signature: str
-    decision: Literal["promote_candidate", "flaky", "discard"]
-
-
-class SecurityViolation(RuntimeError):
-    """Raised when harness execution violates sandbox or path invariants."""
+    reasons: tuple[str, ...] = ()
+    match: bool = False
+    surprise: bool = False
+    signature: str = ""

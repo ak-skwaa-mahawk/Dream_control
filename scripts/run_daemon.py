@@ -11,7 +11,6 @@ import argparse
 import logging
 from pathlib import Path
 
-# Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -51,9 +50,12 @@ def build_default_catalog(harness_tree: Path) -> dict[str, HarnessSpec]:
             target_subsystem="concurrency_limits",
             params={
                 "concurrency": ParamSpec(kind="int", lo=1, hi=128),
-                "tight_timeout": ParamSpec(kind="int", lo=1, hi=5000),
+                "timeout_s": ParamSpec(kind="float", lo=0.001, hi=1.0),
             },
-            allowed_observables=frozenset(["veto", "timeout", "intra_vires"]),
+            allowed_observables=frozenset([
+                "statutory_veto_reached",
+                "admission_timeout",
+            ]),
             runner_binary=fuzz_runner,
         )
 
@@ -61,7 +63,7 @@ def build_default_catalog(harness_tree: Path) -> dict[str, HarnessSpec]:
 
 
 def dummy_llm_callable(prompt: str, temperature: float = 0.7) -> str:
-    """Deterministic fallback generator satisfying the two-phase Dreamer compiler contract."""
+    """Fallback generator satisfying the two-phase Dreamer compiler contract."""
     return (
         "```json\n"
         "{\n"
