@@ -3,7 +3,7 @@
 core/warden.py
 Sandboxed harness runner with POSIX timeouts, cgroup v2 accounting/limits,
 Linux namespace isolation (unshare), bounded stream consumption,
-and probe allowlisting.
+deterministic process reaping, and probe allowlisting.
 """
 
 import os
@@ -62,7 +62,6 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
 
 
 def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[bytes, bytes, bool]:
-    """Reads stdout and stderr up to MAX_STDIO_BYTES without loading unbounded streams into memory."""
     stdout_buf = bytearray()
     stderr_buf = bytearray()
     t_start = time.perf_counter()
@@ -94,7 +93,6 @@ def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[byt
                 stderr_buf.extend(chunk[: MAX_STDIO_BYTES - len(stderr_buf)])
 
         if proc.poll() is not None:
-            # Drain remaining data up to bounds
             for pipe in reads:
                 try:
                     chunk = pipe.read(4096)
@@ -185,6 +183,7 @@ def execute_in_cell(
     probes_captured: dict[str, bool] = {}
 
     t_start = time.perf_counter()
+    proc = None
     try:
         proc = subprocess.Popen(
             cmd,
@@ -202,19 +201,33 @@ def execute_in_cell(
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
             exit_code = 124
             signal_num = signal.SIGKILL
         else:
-            exit_code = proc.poll()
+            exit_code = proc.wait()
     except Exception:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        if proc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         exit_code = 124
         signal_num = signal.SIGKILL
     finally:
         wall_ms = int((time.perf_counter() - t_start) * 1000)
+        if proc:
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
 
     max_rss_kb = _read_cgroup_peak_kb(cg_path) if has_cg else 0
     _cleanup_cgroup(cg_path)
