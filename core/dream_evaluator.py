@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 core/dream_evaluator.py
-Evaluation logic, bit-exact trace signatures, and corpus-frequency novelty decay.
+Pure evaluation logic, bit-exact trace signatures, and corpus-frequency novelty decay.
 """
 
 from hashlib import sha256
 import json
-from typing import Sequence, Mapping
+from typing import Sequence
 from core.dream_contract import Experiment, RawTrace, Verdict
 
 
@@ -19,7 +19,6 @@ class SignatureCorpus:
     def get_novelty(self, harness_id: str, sig0: str) -> float:
         history = self._corpus.get(harness_id, [])
         matches = sum(1 for s in history if s == sig0)
-        # N = 1 - (|{s in C_h : s == s0}| / (1 + |C_h|))
         return 1.0 - (matches / (1.0 + len(history)))
 
     def record(self, harness_id: str, sig0: str) -> None:
@@ -40,7 +39,7 @@ def compute_signature(t: RawTrace) -> str:
 def evaluate_traces(
     exp: Experiment,
     traces: Sequence[RawTrace],
-    corpus: SignatureCorpus,
+    novelty: float,
     tau: float = 2.0,
 ) -> Verdict:
     if not traces:
@@ -48,7 +47,6 @@ def evaluate_traces(
 
     primary = traces[0]
     sig0 = compute_signature(primary)
-    novelty = corpus.get_novelty(exp.harness_id, sig0)
 
     observed = {name for name, bit in primary.probes.items() if bit}
     if primary.signal not in (None, 0) or (primary.exit_code is not None and primary.exit_code < 0):
@@ -59,7 +57,6 @@ def evaluate_traces(
     match = exp.expected in observed
     surprise = any(u in observed for u in exp.unexpected)
 
-    # Weights: w_M=1.0, w_S=2.0, w_N=1.0
     score = (1.0 if match else 0.0) + (2.0 if surprise else 0.0) + novelty
     reproduced = all(compute_signature(t) == sig0 for t in traces)
 
@@ -67,10 +64,8 @@ def evaluate_traces(
         decision = "discard"
     elif reproduced:
         decision = "promote_candidate"
-        corpus.record(exp.harness_id, sig0)
     else:
         decision = "flaky"
-        corpus.record(exp.harness_id, sig0)
 
     return Verdict(
         score=score,
