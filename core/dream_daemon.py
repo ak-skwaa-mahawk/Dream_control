@@ -202,7 +202,7 @@ class DreamDaemon:
             "k_replicates": self.k_replicates,
         }
 
-        if verdict.decision == "promote_candidate":
+        if verdict.decision in ("promote_candidate", "promote_soft"):
             existing = {(s["harness_id"], s["signature"]) for s in self.promoted_seeds}
             if (entry["harness_id"], entry["signature"]) not in existing:
                 self.promoted_seeds.append(entry)

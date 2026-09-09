@@ -3,10 +3,10 @@ import unittest
 import tempfile
 from pathlib import Path
 
-from core.dream_contract import HarnessSpec, ParamSpec, SecurityViolation
+from core.dream_contract import HarnessSpec, ParamSpec, SecurityViolation, Experiment, RawTrace
 from core.experiment_validator import decode_params, ParameterValidationError
 from core.warden import execute_in_cell
-from core.dream_evaluator import SignatureCorpus
+from core.dream_evaluator import evaluate_traces,  SignatureCorpus
 from core.dream_scheduler import schedule_next_dream
 
 class TestDreamControlPlane(unittest.TestCase):
@@ -141,7 +141,7 @@ class TestDreamControlPlane(unittest.TestCase):
         self.assertEqual(plan["harness_id"], "fuzz_gate")
 
     def test_signature_corpus_novelty_decay_formula(self):
-        from core.dream_evaluator import SignatureCorpus
+        from core.dream_evaluator import evaluate_traces,  SignatureCorpus
         corpus = SignatureCorpus()
         harness = "admission_gate_policy"
         sig_a = "sig_nominal_001"
@@ -163,6 +163,41 @@ class TestDreamControlPlane(unittest.TestCase):
         self.assertAlmostEqual(corpus.get_novelty(harness, sig_b), 1.0)
 
 
+
+    def test_soft_consensus_promotes_with_jaccard_above_threshold(self):
+        exp = Experiment(
+            dream_id="d_soft",
+            harness_id="fuzz_target",
+            parameters={"concurrency": 2},
+            expected="timeout",
+            unexpected=("statutory_veto_reached",),
+            budget_ms=500,
+        )
+        t1 = RawTrace(exit_code=124, wall_ms=10, probes={"timeout": True, "p1": True}, stdout_hash="h1", stderr_hash="e1", signal=None, max_rss_kb=100, isolation={})
+        t2 = RawTrace(exit_code=124, wall_ms=10, probes={"timeout": True, "p1": True}, stdout_hash="h2", stderr_hash="e2", signal=None, max_rss_kb=100, isolation={})
+        t3 = RawTrace(exit_code=124, wall_ms=10, probes={"timeout": True, "p2": True}, stdout_hash="h3", stderr_hash="e3", signal=None, max_rss_kb=100, isolation={})
+
+        verdict = evaluate_traces(exp, [t1, t2, t3], novelty=1.0, tau=1.0, consensus_threshold=0.50)
+        self.assertEqual(verdict.decision, "promote_soft")
+        self.assertGreater(verdict.score, 0.0)
+
+    def test_soft_consensus_strictly_vetoed_by_unexpected_observable(self):
+        exp = Experiment(
+            dream_id="d_veto",
+            harness_id="admission_gate",
+            parameters={"target_path": "/etc/shadow"},
+            expected="timeout",
+            unexpected=("statutory_veto_reached",),
+            budget_ms=500,
+        )
+        t1 = RawTrace(exit_code=124, wall_ms=10, probes={"timeout": True}, stdout_hash="h1", stderr_hash="e1", signal=None, max_rss_kb=100, isolation={})
+        t2 = RawTrace(exit_code=124, wall_ms=10, probes={"timeout": True, "statutory_veto_reached": True}, stdout_hash="h2", stderr_hash="e2", signal=None, max_rss_kb=100, isolation={})
+        t3 = RawTrace(exit_code=124, wall_ms=10, probes={"timeout": True}, stdout_hash="h3", stderr_hash="e3", signal=None, max_rss_kb=100, isolation={})
+
+        verdict = evaluate_traces(exp, [t1, t2, t3], novelty=1.0, tau=1.5)
+        self.assertEqual(verdict.decision, "discard")
+        self.assertTrue(any("unexpected_observable_triggered" in r for r in verdict.reasons))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
@@ -181,7 +216,7 @@ if __name__ == "__main__":
             trace = execute_in_cell(spec, {}, 100, tmp_p / "ws", tmp_p)
             self.assertEqual(trace.exit_code, 124)
             self.assertIsNone(trace.signal)
-            from core.dream_evaluator import evaluate_traces
+            from core.dream_evaluator import evaluate_traces,  evaluate_traces
             from core.dream_contract import Experiment
             exp = Experiment("d1", "hang", {}, "timeout", ("panic",), 100)
             verdict = evaluate_traces(exp, [trace], 1.0)
