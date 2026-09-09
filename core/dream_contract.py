@@ -77,3 +77,7 @@ class Verdict:
     novelty: float
     signature: str
     decision: Literal["promote_candidate", "flaky", "discard"]
+
+
+class SecurityViolation(RuntimeError):
+    """Raised when harness execution violates sandbox or path invariants."""
