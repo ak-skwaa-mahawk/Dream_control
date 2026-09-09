@@ -215,5 +215,29 @@ class TestInvariantsAndHardening(unittest.TestCase):
         self.assertTrue(trace.probes.get("mock_dispatched"))
         self.assertEqual(trace.isolation.get("backend"), "mock")
 
+
+    def test_charter_loader_supports_inline_base64_payload(self):
+        import base64
+        import json
+        import os
+        from harnesses.gate_fuzz_runner import load_charter
+
+        custom_charter = {
+            "authorized_prefixes": ["/tmp/safe_zone"],
+            "statutory_prohibitions": ["/etc/shadow"],
+        }
+        encoded = base64.b64encode(json.dumps(custom_charter).encode("utf-8")).decode("ascii")
+
+        old_val = os.environ.get("ADMISSION_GATE_CHARTER_PAYLOAD")
+        try:
+            os.environ["ADMISSION_GATE_CHARTER_PAYLOAD"] = encoded
+            charter = load_charter()
+            self.assertEqual(charter.get("authorized_prefixes"), ["/tmp/safe_zone"])
+        finally:
+            if old_val is None:
+                os.environ.pop("ADMISSION_GATE_CHARTER_PAYLOAD", None)
+            else:
+                os.environ["ADMISSION_GATE_CHARTER_PAYLOAD"] = old_val
+
 if __name__ == "__main__":
     unittest.main()

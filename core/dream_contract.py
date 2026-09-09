@@ -90,3 +90,11 @@ class Verdict:
     match: bool = False
     surprise: bool = False
     signature: str = ""
+
+from enum import Enum
+
+
+class CharterTransportType(str, Enum):
+    FD_INHERIT = "fd"
+    ENV_INLINE = "env_inline"
+    SOCKET_STREAM = "socket"

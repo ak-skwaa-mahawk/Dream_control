@@ -1,3 +1,4 @@
+import base64
 #!/usr/bin/env python3
 """
 harnesses/gate_fuzz_runner.py
@@ -115,6 +116,18 @@ def evaluate_admission_policy_fallback(
 
 
 def load_charter_pinned(allow_default: bool = True) -> dict | None:
+    # 1. Inline base64 payload (container-native & distributed transport)
+    inline_payload = os.environ.get("ADMISSION_GATE_CHARTER_PAYLOAD")
+    if inline_payload:
+        try:
+            raw_bytes = base64.b64decode(inline_payload.encode("ascii"))
+            data = json.loads(raw_bytes.decode("utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
+    # 2. File descriptor inheritance (local zero-copy)
     charter_fd_env = os.environ.get("ADMISSION_GATE_CHARTER_FD")
     if charter_fd_env and charter_fd_env.isdigit():
         fd = int(charter_fd_env)
@@ -132,6 +145,11 @@ def load_charter_pinned(allow_default: bool = True) -> dict | None:
             "authorized_actions": ["SHELL_EXEC", "SHELL_READ"],
         }
     return None
+
+
+def load_charter() -> dict:
+    charter = load_charter_pinned(allow_default=True)
+    return charter if charter is not None else {}
 
 
 def main():
