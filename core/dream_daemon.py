@@ -359,13 +359,21 @@ class DreamDaemon:
         attestation_record = None
         if verdict.decision in ("promote_candidate", "promote_soft"):
             attestation_record = self._sign_and_record_attestation(exp, verdict, traces)
-            existing = {(s["harness_id"], s["signature"]) for s in self.promoted_seeds}
+            existing = {
+            (s.get("harness_id"), s.get("signature"))
+            for s in self.promoted_seeds
+            if isinstance(s, dict) and "harness_id" in s and "signature" in s
+        }
             if (entry["harness_id"], entry["signature"]) not in existing:
                 self.promoted_seeds.append(entry)
                 self._save_json_list(self.promoted_seeds, self.seed_bank_path)
         elif verdict.decision == "flaky":
             entry["divergent_signatures"] = sorted({compute_signature(t) for t in traces})
-            existing_flaky = {(s["harness_id"], s["signature"]) for s in self.flaky_seeds}
+            existing_flaky = {
+            (s.get("harness_id"), s.get("signature"))
+            for s in self.flaky_seeds
+            if isinstance(s, dict) and "harness_id" in s and "signature" in s
+        }
             if (entry["harness_id"], entry["signature"]) not in existing_flaky:
                 self.flaky_seeds.append(entry)
                 self._save_json_list(self.flaky_seeds, self.flaky_bank_path)
