@@ -72,5 +72,76 @@ class TestAuditWatcher(unittest.TestCase):
         self.assertIn("buffer_boundary_exceeded", seeds[0]["raw_residue"])
 
 
+    def test_concurrent_watcher_ingestion_and_daemon_scheduling(self):
+        import time
+        import subprocess
+        import json
+        from pathlib import Path
+
+        base_dir = Path(self.tmp_dir.name)
+        log_file = base_dir / "live_audit_stream.jsonl"
+        seed_bank = base_dir / "live_seed_bank.json"
+        ws = base_dir / "daemon_ws"
+        log_file.touch()
+
+        # Seed initial bank from template if available, else empty list
+        tmpl = Path("seeds/seed_bank_template.json")
+        initial_seeds = json.loads(tmpl.read_text(encoding="utf-8")) if tmpl.exists() else []
+        seed_bank.write_text(json.dumps(initial_seeds), encoding="utf-8")
+        base_count = len(initial_seeds)
+
+        # Start live watcher
+        watcher = subprocess.Popen(
+            [
+                "python3", "scripts/watch_admission_log.py",
+                "--audit-log", str(log_file),
+                "--seed-bank", str(seed_bank),
+                "--poll-interval", "0.05",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            time.sleep(0.15)
+
+            # Emit denial anomaly
+            entry = {
+                "timestamp": time.time(),
+                "decision": "DENY",
+                "policy_passed": False,
+                "reason": "buffer_boundary_exceeded",
+                "harness_id": "unix_sock_fuzzer",
+                "parameters": {"payload_len": 65536, "use_abstract": 0, "pass_descriptor": 0},
+            }
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+
+            # Let watcher ingest
+            time.sleep(0.25)
+
+            # Run 2 daemon cycles concurrently
+            daemon = subprocess.run(
+                [
+                    "python3", "core/dream_daemon.py",
+                    "--max-cycles", "2",
+                    "--sleep-interval", "0.01",
+                    "--workspace", str(ws),
+                    "--seed-bank", str(seed_bank),
+                    "--decay-mode", "steep_exponential",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(daemon.returncode, 0, f"Daemon failed: {daemon.stderr}")
+
+            # Verify seed bank received new anomaly
+            updated = json.loads(seed_bank.read_text(encoding="utf-8"))
+            self.assertGreaterEqual(len(updated), base_count + 1)
+            self.assertTrue(any(s.get("raw_residue") == "buffer_boundary_exceeded" for s in updated))
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=2.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
