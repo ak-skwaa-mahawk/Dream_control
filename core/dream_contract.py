@@ -183,6 +183,8 @@ MCP_SERVER_SPEC = HarnessSpec(
     params={
         "method": ParamSpec(kind="str", lo=1.0, hi=64.0),
         "uri": ParamSpec(kind="str", lo=1.0, hi=512.0),
+        "tool_name": ParamSpec(kind="str", lo=1.0, hi=64.0),
+        "tool_args": ParamSpec(kind="str", lo=2.0, hi=2048.0),
         "payload_size_kb": ParamSpec(kind="int", lo=1.0, hi=4096.0),
         "timeout_s": ParamSpec(kind="float", lo=0.001, hi=5.0),
     },
