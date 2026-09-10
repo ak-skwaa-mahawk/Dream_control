@@ -250,6 +250,8 @@ def parse_args():
     parser.add_argument("--workspace", type=Path, default=Path(tempfile.gettempdir()) / "dream_workspace", help="Workspace root")
     parser.add_argument("--seed-bank", type=Path, default=Path("seed_bank.json"), help="Seed bank path")
     parser.add_argument("--harness-tree", type=Path, default=Path("harnesses"), help="Harnesses directory")
+    parser.add_argument("--max-cycles", type=int, default=1, help="Max cycles to run (0 for infinite loop)")
+    parser.add_argument("--sleep-interval", type=float, default=1.0, help="Idle sleep interval between cycles in seconds")
     return parser.parse_args()
 
 
@@ -296,5 +298,16 @@ if __name__ == "__main__":
         require_isolation=args.require_isolation,
     )
 
-    result = daemon.run_cycle()
-    print(f"Cycle execution complete. Decision: {result}")
+    cycle_count = 0
+    try:
+        while True:
+            cycle_count += 1
+            logger.info(f"--- Starting DreamDaemon Cycle #{cycle_count} ---")
+            result = daemon.run_cycle()
+            print(f"Cycle #{cycle_count} execution complete. Decision: {result.get("decision")} (score: {result.get("score", 0.0):.2f})")
+            if args.max_cycles > 0 and cycle_count >= args.max_cycles:
+                break
+            if args.sleep_interval > 0:
+                time.sleep(args.sleep_interval)
+    except KeyboardInterrupt:
+        logger.info("Daemon interrupted by operator; exiting cleanly.")
