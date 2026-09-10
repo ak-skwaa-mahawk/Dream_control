@@ -1,0 +1,47 @@
+services:
+  dream-daemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dream-control:latest
+    container_name: dream_daemon
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Retain SYS_ADMIN only if utilizing nested unshare/user namespaces inside the container
+    # cap_add:
+    #   - SYS_ADMIN
+    environment:
+      - WARDEN_BACKEND=host
+      - PYTHONWARNINGS=error::ResourceWarning
+    volumes:
+      - dream_workspace:/var/dream/workspace:rw
+      - dream_data:/var/dream/data:rw
+      - dream_seeds:/var/dream/seeds:rw
+      - /tmp:/tmp:rw,noexec,nosuid,size=64m
+    tmpfs:
+      - /run:rw,noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  dream_workspace:
+    driver: local
+  dream_data:
+    driver: local
+  dream_seeds:
+    driver: local
