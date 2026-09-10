@@ -12,6 +12,7 @@ from typing import Any
 
 DEFAULT_LOG_PATH = Path.home() / "sovereign-manifold" / "logs"
 DEFAULT_AUDIT_LOG = Path.home() / "admission-gate" / "audit_log.jsonl"
+DEFAULT_SEED_BANK = Path("seed_bank.json")
 
 ANOMALY_PATTERNS = [
     re.compile(r"timeout", re.IGNORECASE),
@@ -101,11 +102,17 @@ def collect_all_seeds(
     return audit_seeds + log_seeds
 
 
-def write_seed_bank(seeds: list[dict[str, Any]], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(seeds, indent=2), encoding="utf-8")
-
-
-if __name__ == "__main__":
-    extracted = collect_all_seeds()
-    print(f"Extracted {len(extracted)} telemetry and audit seeds.")
+def write_seed_bank(seeds: list[dict[str, Any]], bank_path: Path = DEFAULT_SEED_BANK) -> None:
+    """Atomically persist extracted seeds into JSON seed bank to avoid write-race corruption."""
+    import tempfile
+    import os
+    bank_path = Path(bank_path)
+    bank_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = bank_path.parent
+    with tempfile.NamedTemporaryFile("w", dir=temp_dir, delete=False, encoding="utf-8") as tf:
+        json.dump(seeds, tf, indent=2)
+        tf.write("\n")
+        tf.flush()
+        os.fsync(tf.fileno())
+        temp_name = tf.name
+    os.replace(temp_name, bank_path)

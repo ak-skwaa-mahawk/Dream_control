@@ -77,5 +77,18 @@ class TestTelemetrySeed(unittest.TestCase):
             self.assertEqual(len(all_seeds), 2)
 
 
+    def test_atomic_write_seed_bank(self):
+        import tempfile
+        import json
+        from core.telemetry_seed import write_seed_bank
+
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "subdir" / "seeds.json"
+            data = [{"seed_id": "s1", "raw_residue": "test"}]
+            write_seed_bank(data, target)
+            self.assertTrue(target.is_file())
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(loaded, data)
+
 if __name__ == "__main__":
     unittest.main()
