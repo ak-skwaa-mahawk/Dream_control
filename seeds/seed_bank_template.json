@@ -19,10 +19,8 @@
     "harness_id": "unix_sock_fuzzer",
     "description": "Probe Linux abstract socket namespace boundary isolation",
     "parameters": {
-      "sock_type": "dgram",
       "use_abstract": 1,
       "pass_descriptor": 0,
-      "socket_name": "dream_abstract_cell_probe",
       "payload_len": 128
     },
     "anomaly_trigger": "abstract_leaked",
@@ -33,10 +31,8 @@
     "harness_id": "unix_sock_fuzzer",
     "description": "Stress SCM_RIGHTS ancillary descriptor passing through containment cell",
     "parameters": {
-      "sock_type": "stream",
       "use_abstract": 0,
       "pass_descriptor": 1,
-      "socket_name": "dream_scm_rights.sock",
       "payload_len": 256
     },
     "anomaly_trigger": "ancillary_passed",
@@ -47,10 +43,8 @@
     "harness_id": "unix_sock_fuzzer",
     "description": "Push maximum buffer payload to trigger kernel datagram truncation boundary",
     "parameters": {
-      "sock_type": "dgram",
       "use_abstract": 0,
       "pass_descriptor": 0,
-      "socket_name": "dream_trunc_probe.sock",
       "payload_len": 65536
     },
     "anomaly_trigger": "socket_truncated",

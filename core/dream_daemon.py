@@ -311,7 +311,10 @@ if __name__ == "__main__":
             cycle_count += 1
             logger.info(f"--- Starting DreamDaemon Cycle #{cycle_count} ---")
             result = daemon.run_cycle()
-            print(f"Cycle #{cycle_count} execution complete. Decision: {result.get("decision")} (score: {result.get("score", 0.0):.2f})")
+            if result is None:
+                logger.warning(f"Cycle #{cycle_count} yielded no valid candidate.")
+            else:
+                print(f"Cycle #{cycle_count} execution complete. Decision: {result.get('decision')} (score: {result.get('score', 0.0):.2f})")
             if args.max_cycles > 0 and cycle_count >= args.max_cycles:
                 break
             if args.sleep_interval > 0:
