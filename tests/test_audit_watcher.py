@@ -140,7 +140,14 @@ class TestAuditWatcher(unittest.TestCase):
             self.assertTrue(any(s.get("raw_residue") == "buffer_boundary_exceeded" for s in updated))
         finally:
             watcher.terminate()
-            watcher.wait(timeout=2.0)
+            try:
+                watcher.wait(timeout=2.0)
+            except Exception:
+                watcher.kill()
+            if watcher.stdout:
+                watcher.stdout.close()
+            if watcher.stderr:
+                watcher.stderr.close()
 
 
 if __name__ == "__main__":
