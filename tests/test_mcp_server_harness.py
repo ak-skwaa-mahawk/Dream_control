@@ -26,6 +26,7 @@ class TestMCPServerHarness(unittest.TestCase):
         }
         res = simulate_mcp_rpc_call(params, self.workspace)
         self.assertEqual(res["signal"], "intra_vires_confirmed")
+        self.assertTrue(res["probes"]["intra_vires_confirmed"])
 
     def test_path_traversal_triggers_statutory_veto(self):
         traversals = [
@@ -38,6 +39,7 @@ class TestMCPServerHarness(unittest.TestCase):
             params = {"method": "resources/read", "uri": t, "payload_size_kb": 1, "timeout_s": 0.5}
             res = simulate_mcp_rpc_call(params, self.workspace)
             self.assertEqual(res["signal"], "statutory_veto_reached", f"Failed for {t}")
+            self.assertTrue(res["probes"]["statutory_veto_reached"])
 
     def test_null_byte_injection_triggers_statutory_veto(self):
         params = {
@@ -49,9 +51,45 @@ class TestMCPServerHarness(unittest.TestCase):
         res = simulate_mcp_rpc_call(params, self.workspace)
         self.assertEqual(res["signal"], "statutory_veto_reached")
 
+    def test_prototype_pollution_triggers_statutory_veto(self):
+        payloads = [
+            {"method": "tools/call", "tool_name": "exec_cmd", "tool_args": {"__proto__": {"isAdmin": True}}},
+            {"method": "tools/call", "tool_name": "exec_cmd", "tool_args": {"options": {"constructor": {"prototype": {"polluted": 1}}}}},
+            {"method": "tools/call", "tool_name": "__proto__", "tool_args": {"input": "safe"}},
+        ]
+        for p in payloads:
+            res = simulate_mcp_rpc_call(p, self.workspace)
+            self.assertEqual(res["signal"], "statutory_veto_reached", f"Failed for {p}")
+            self.assertIn("prototype_pollution_vetoed", res["detail"])
+
+    def test_command_injection_triggers_statutory_veto(self):
+        payloads = [
+            {"method": "tools/call", "tool_name": "build", "tool_args": {"target": "all; rm -rf /"}},
+            {"method": "tools/call", "tool_name": "build", "tool_args": {"target": "all | id"}},
+            {"method": "tools/call", "tool_name": "build", "tool_args": {"cmd": "$(cat /etc/passwd)"}},
+            {"method": "tools/call", "tool_name": "build", "tool_args": {"env": "prod`id`"}},
+        ]
+        for p in payloads:
+            res = simulate_mcp_rpc_call(p, self.workspace)
+            self.assertEqual(res["signal"], "statutory_veto_reached", f"Failed for {p}")
+            self.assertIn("command_injection_vetoed", res["detail"])
+
+    def test_safe_tool_call_confirms_intra_vires(self):
+        params = {
+            "method": "tools/call",
+            "tool_name": "echo",
+            "tool_args": {"message": "hello world", "format": "json"},
+            "payload_size_kb": 1,
+            "timeout_s": 0.5,
+        }
+        res = simulate_mcp_rpc_call(params, self.workspace)
+        self.assertEqual(res["signal"], "intra_vires_confirmed")
+        self.assertTrue(res["probes"]["intra_vires_confirmed"])
+
     def test_payload_exhaustion_triggers_statutory_veto(self):
         params = {
             "method": "tools/call",
+            "tool_name": "echo",
             "uri": "file://tool",
             "payload_size_kb": 4096,
             "timeout_s": 0.5,
