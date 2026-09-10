@@ -186,5 +186,53 @@ class TestDreamDaemon(unittest.TestCase):
         finally:
             sys.argv = orig_argv
 
+    def test_unix_dgram_telemetry_listener_high_frequency_ingestion(self):
+        import socket
+        import json
+        import tempfile
+        from pathlib import Path
+        from core.dream_contract import DEFAULT_CATALOG
+
+        def mock_llm(prompt: str, temp: float) -> str:
+            return json.dumps({"target_path": "/tmp/sandbox", "mode": "read"})
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            sock_path = str(base / "test_telemetry.sock")
+            ws_root = base / "daemon_ws"
+            sbank = base / "seeds.json"
+            sbank.write_text("[]", encoding="utf-8")
+
+            daemon = DreamDaemon(
+                catalog=DEFAULT_CATALOG,
+                workspace_root=ws_root,
+                seed_bank_path=sbank,
+                llm_callable=mock_llm,
+                telemetry_sock=sock_path,
+            )
+            try:
+                client_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                for i in range(79):
+                    pkt = {
+                        "decision": "DENY",
+                        "policy_passed": False,
+                        "reason": f"stream_anomaly_{i % 5}",
+                        "seq": i,
+                    }
+                    client_sock.sendto(json.dumps(pkt).encode("utf-8"), sock_path)
+                client_sock.close()
+
+                # Execute run_cycle which drains socket non-blockingly
+                cycle_res = daemon.run_cycle()
+                self.assertIsNotNone(cycle_res)
+                self.assertGreaterEqual(len(daemon.live_telemetry_seeds), 79)
+
+                # Verify seed bank received the 79 datagram seeds
+                bank_data = json.loads(sbank.read_text(encoding="utf-8"))
+                self.assertGreaterEqual(len(bank_data), 79)
+            finally:
+                daemon.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

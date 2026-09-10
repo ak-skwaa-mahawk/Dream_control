@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import os
+import socket
 import time
 import tempfile
 import json
@@ -69,7 +70,8 @@ class DreamDaemon:
         phase1_temp: float = 1.1,
         phase2_temp: float = 0.2,
         decay_mode: str = "linear",
-        decay_alpha: float = 0.5):
+        decay_alpha: float = 0.5,
+                 telemetry_sock: str | Path | None = None):
         self.catalog = catalog
         self.workspace_root = workspace_root
         self.seed_bank_path = seed_bank_path
@@ -92,6 +94,87 @@ class DreamDaemon:
         self.corpus = self._load_corpus()
         self.promoted_seeds: list[dict[str, Any]] = self._load_json_list(self.seed_bank_path)
         self.flaky_seeds: list[dict[str, Any]] = self._load_json_list(self.flaky_bank_path)
+        self.telemetry_sock_path = str(telemetry_sock) if telemetry_sock else None
+        self.telemetry_sock: socket.socket | None = None
+        self.live_telemetry_seeds: list[dict[str, Any]] = []
+        self._init_telemetry_socket()
+
+    def _init_telemetry_socket(self) -> None:
+        if not self.telemetry_sock_path:
+            return
+        addr = self.telemetry_sock_path
+        if addr.startswith("@"):
+            addr = "\0" + addr[1:]
+        elif not addr.startswith("\0"):
+            try:
+                os.unlink(addr)
+            except OSError:
+                pass
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        sock.bind(addr)
+        self.telemetry_sock = sock
+        logger.info(f"Telemetry UNIX datagram listener bound at {self.telemetry_sock_path}")
+
+    def drain_telemetry(self, max_packets: int = 512) -> int:
+        if not self.telemetry_sock:
+            return 0
+        ingested = 0
+        for _ in range(max_packets):
+            try:
+                payload, _ = self.telemetry_sock.recvfrom(65536)
+            except (BlockingIOError, InterruptedError):
+                break
+            except OSError as err:
+                logger.warning(f"Telemetry socket read error: {err}")
+                break
+
+            if not payload:
+                continue
+            try:
+                entry = json.loads(payload.decode("utf-8", errors="replace"))
+            except Exception:
+                continue
+
+            if not isinstance(entry, dict):
+                continue
+
+            # Check if anomaly or statutory veto
+            is_anomaly = (
+                entry.get("policy_passed") is False
+                or entry.get("decision") == "DENY"
+                or bool(entry.get("anomaly_trigger"))
+                or bool(entry.get("reason"))
+            )
+            if is_anomaly:
+                reason = entry.get("reason") or entry.get("anomaly_trigger") or "telemetry_stream_rejection"
+                seed = {
+                    "source": "dgram_telemetry_stream",
+                    "seed_type": "audit_rejection",
+                    "raw_residue": str(reason),
+                    "entry": entry,
+                }
+                self.live_telemetry_seeds.append(seed)
+                self.promoted_seeds.append(seed)
+                ingested += 1
+
+        if ingested > 0:
+            logger.info(f"Drained {ingested} live telemetry packet(s) from UNIX datagram socket")
+            self._save_json_list(self.promoted_seeds, self.seed_bank_path)
+        return ingested
+
+    def close(self) -> None:
+        if self.telemetry_sock:
+            try:
+                self.telemetry_sock.close()
+            except Exception:
+                pass
+            if self.telemetry_sock_path and not self.telemetry_sock_path.startswith("@") and not self.telemetry_sock_path.startswith("\0"):
+                try:
+                    os.unlink(self.telemetry_sock_path)
+                except OSError:
+                    pass
+            self.telemetry_sock = None
 
     def _load_json_list(self, path: Path) -> list[dict[str, Any]]:
         if path.is_file():
@@ -123,6 +206,7 @@ class DreamDaemon:
         self.corpus_path.write_text(json.dumps(self.corpus._corpus, indent=2), encoding="utf-8")
 
     def run_cycle(self) -> dict[str, Any] | None:
+        self.drain_telemetry()
         outliers: list[dict[str, Any]] = []
         if self.log_dir or self.audit_path:
             log_d = self.log_dir or Path("/nonexistent/log/dir")
@@ -256,6 +340,7 @@ def parse_args():
     parser.add_argument("--seed-bank", type=Path, default=Path("seed_bank.json"), help="Seed bank path")
     parser.add_argument("--harness-tree", type=Path, default=Path("harnesses"), help="Harnesses directory")
     parser.add_argument("--max-cycles", type=int, default=1, help="Max cycles to run (0 for infinite loop)")
+    parser.add_argument("--telemetry-sock", type=str, default=None, help="UNIX datagram socket path (or @abstract) for 79 Hz telemetry streaming")
     parser.add_argument("--sleep-interval", type=float, default=1.0, help="Idle sleep interval between cycles in seconds")
     return parser.parse_args()
 
@@ -298,6 +383,7 @@ if __name__ == "__main__":
         k_replicates=args.k_replicates,
         tau=args.tau,
         consensus_threshold=args.consensus_threshold,
+                                      telemetry_sock=args.telemetry_sock,
         phase1_temp=args.temp_diverge,
         phase2_temp=args.temp_converge,
         require_isolation=args.require_isolation,
@@ -321,3 +407,5 @@ if __name__ == "__main__":
                 time.sleep(args.sleep_interval)
     except KeyboardInterrupt:
         logger.info("Daemon interrupted by operator; exiting cleanly.")
+    finally:
+        daemon.close()
