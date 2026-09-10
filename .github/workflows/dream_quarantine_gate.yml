@@ -1,0 +1,39 @@
+name: DreamControl Quarantine Gate
+
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - 'harnesses/**'
+      - 'seeds/**'
+      - 'core/**'
+  push:
+    branches:
+      - main
+
+jobs:
+  adversarial_audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Quarantine Cell Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: dream_control_gate:latest
+
+      - name: Execute Adversarial Pre-Flight Verification
+        run: |
+          docker run --rm \
+            --cap-add=SYS_ADMIN \
+            --security-opt no-new-privileges:true \
+            dream_control_gate:latest \
+            --max-cycles 5 \
+            --decay-mode steep_exponential \
+            --tau 2.0 \
+            --consensus-threshold 0.67

@@ -1,42 +1,23 @@
-# syntax=docker/dockerfile:1.7
-FROM python:3.12-slim-bookworm AS base
+FROM python:3.11-slim
 
-# Security & environment hardening
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONWARNINGS="error::ResourceWarning" \
-    WARDEN_BACKEND=host
-
-# Minimal runtime dependencies for sandboxing and inspection
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini \
-    ca-certificates \
-    libcap2-bin \
+    util-linux \
+    libc6 \
     && rm -rf /var/lib/apt/lists/*
-
-# Create dedicated non-root runner user
-RUN groupadd -g 10001 dreamrunner && \
-    useradd -u 10001 -g dreamrunner -m -s /bin/bash -d /home/dreamrunner dreamrunner
 
 WORKDIR /app
 
-# Copy project tree
-COPY --chown=root:root core/ ./core/
-COPY --chown=root:root harnesses/ ./harnesses/
-COPY --chown=root:root tests/ ./tests/
-COPY --chown=root:root entrypoint.sh ./entrypoint.sh
+ENV PATH="/usr/local/bin:/usr/bin:/bin" \
+    LANG="C.UTF-8" \
+    LC_ALL="C.UTF-8" \
+    PYTHONHASHSEED="0" \
+    PYTHONUNBUFFERED="1"
 
-# Establish secure workspace directories with strict ownership
-RUN mkdir -p /var/dream/workspace /var/dream/data /var/dream/seeds && \
-    chmod +x ./entrypoint.sh && \
-    chown -R dreamrunner:dreamrunner /var/dream
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir .
 
-# Default read-only harness permissions
-RUN chmod -R 0555 /app/harnesses
+COPY . .
 
-USER dreamrunner:dreamrunner
+RUN chmod 700 /app/core && chmod -R 755 /app/harnesses && chmod +x /app/entrypoint.sh
 
-VOLUME ["/var/dream/workspace", "/var/dream/data", "/var/dream/seeds"]
-
-ENTRYPOINT ["/usr/bin/tini", "--", "./entrypoint.sh"]
-CMD ["daemon"]
+ENTRYPOINT ["/app/entrypoint.sh"]
