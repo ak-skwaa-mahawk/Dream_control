@@ -13,13 +13,38 @@ from core.dream_contract import Experiment, RawTrace, Verdict
 class SignatureCorpus:
     """Tracks historical signatures per harness to compute frequency-based novelty decay."""
 
-    def __init__(self):
+    def __init__(self, decay_mode: str = "linear", alpha: float = 0.5):
         self._corpus: dict[str, list[str]] = {}
+        self.decay_mode = decay_mode
+        self.alpha = alpha
 
-    def get_novelty(self, harness_id: str, sig0: str) -> float:
+    def get_novelty(
+        self,
+        harness_id: str,
+        sig0: str,
+        decay_mode: str | None = None,
+        alpha: float | None = None,
+    ) -> float:
         history = self._corpus.get(harness_id, [])
+        if not history:
+            return 1.0
+
         matches = sum(1 for s in history if s == sig0)
-        return 1.0 - (matches / (1.0 + len(history)))
+        if matches == 0:
+            return 1.0
+
+        mode = decay_mode or self.decay_mode
+        a = alpha if alpha is not None else self.alpha
+
+        if mode == "steep_exponential":
+            # Sharp saturation dropoff: decays exponentially with duplicate count
+            # N(m) = exp(-a * m)
+            import math
+            return float(math.exp(-a * matches))
+
+        # Default linear mode: 1 - m / (1 + |C|)
+        val = 1.0 - (matches / (1.0 + len(history)))
+        return max(0.0, float(val))
 
     MAX_CORPUS_HISTORY = 200
 

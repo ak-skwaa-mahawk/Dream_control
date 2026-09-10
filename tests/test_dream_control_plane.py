@@ -198,6 +198,25 @@ class TestDreamControlPlane(unittest.TestCase):
         self.assertEqual(verdict.decision, "discard")
         self.assertTrue(any("unexpected_observable_triggered" in r for r in verdict.reasons))
 
+    def test_signature_corpus_steep_exponential_decay(self):
+        import math
+        from core.dream_evaluator import SignatureCorpus
+        corpus = SignatureCorpus(decay_mode="steep_exponential", alpha=0.8)
+        harness = "path_escape_fuzzer"
+        sig_frequent = "sig_veto_frequent"
+
+        self.assertEqual(corpus.get_novelty(harness, sig_frequent), 1.0)
+
+        # Record 5 occurrences of the same rejection signature
+        for _ in range(5):
+            corpus.record(harness, sig_frequent)
+
+        # Should decay exponentially: exp(-0.8 * 5) = exp(-4.0) ~= 0.0183
+        expected = math.exp(-0.8 * 5)
+        novelty = corpus.get_novelty(harness, sig_frequent)
+        self.assertAlmostEqual(novelty, expected, places=4)
+        self.assertLess(novelty, 0.05)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
