@@ -177,7 +177,26 @@ UNIX_SOCK_SPEC = HarnessSpec(
     runner_binary=Path("harnesses/unix_sock_fuzzer.py"),
 )
 
+MCP_SERVER_SPEC = HarnessSpec(
+    harness_id="mcp_server_fuzzer",
+    target_subsystem="mcp_server_rpc",
+    params={
+        "method": ParamSpec(kind="str", lo=1.0, hi=64.0),
+        "uri": ParamSpec(kind="str", lo=1.0, hi=512.0),
+        "payload_size_kb": ParamSpec(kind="int", lo=1.0, hi=4096.0),
+        "timeout_s": ParamSpec(kind="float", lo=0.001, hi=5.0),
+    },
+    allowed_observables=frozenset({
+        "intra_vires_confirmed",
+        "statutory_veto_reached",
+        "rpc_error",
+        "admission_timeout",
+    }),
+    runner_binary=Path("harnesses/mcp_server_harness.py"),
+)
+
 DEFAULT_CATALOG: dict[str, HarnessSpec] = {
+    "mcp_server_fuzzer": MCP_SERVER_SPEC,
     "unix_sock_fuzzer": UNIX_SOCK_SPEC,
     "admission_gate_policy": ADMISSION_GATE_SPEC,
     "process_fuzzer": PROCESS_FUZZER_SPEC,
