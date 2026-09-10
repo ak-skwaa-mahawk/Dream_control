@@ -52,6 +52,14 @@ def dispatch_cold_uniform(catalog: Mapping[str, HarnessSpec]) -> dict[str, Any]:
     }
 
 
+def compute_adaptive_budget(base_budget_ms: int, throttle_occurrences: int, min_budget_ms: int = 200) -> int:
+    """Adaptively scale down execution budget under sustained cgroup throttle pressure."""
+    if throttle_occurrences <= 0:
+        return base_budget_ms
+    decay_ratio = 0.8 ** throttle_occurrences
+    return max(min_budget_ms, int(base_budget_ms * decay_ratio))
+
+
 def schedule_next_dream(
     promoted_seeds: list[dict[str, Any]],
     catalog: Mapping[str, HarnessSpec],

@@ -255,6 +255,19 @@ class TestDreamControlPlane(unittest.TestCase):
 
         self.assertAlmostEqual(v_throt.score, v_norm.score * 0.5, places=3)
 
+    def test_scheduler_adaptive_budget_backoff_on_throttling(self):
+        from core.dream_scheduler import compute_adaptive_budget
+        base = 2000
+        b1 = compute_adaptive_budget(base, throttle_occurrences=0)
+        b2 = compute_adaptive_budget(base, throttle_occurrences=1)
+        b3 = compute_adaptive_budget(base, throttle_occurrences=3)
+        b_floor = compute_adaptive_budget(base, throttle_occurrences=20, min_budget_ms=250)
+
+        self.assertEqual(b1, 2000)
+        self.assertLess(b2, b1)
+        self.assertLess(b3, b2)
+        self.assertEqual(b_floor, 250)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
