@@ -333,7 +333,7 @@ class DreamDaemon:
 
         sig0 = compute_signature(traces[0])
         novelty = self.corpus.get_novelty(exp.harness_id, sig0)
-        verdict = evaluate_traces(exp, traces, novelty=novelty, require_isolation=self.require_isolation)
+        verdict = evaluate_traces(exp, traces, novelty=novelty, tau=self.tau, require_isolation=self.require_isolation)
 
         # Isolation enforced directly inside evaluate_traces
 
