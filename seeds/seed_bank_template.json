@@ -1,0 +1,59 @@
+[
+  {
+    "source": "admission_gate_audit",
+    "seed_type": "audit_rejection",
+    "line_number": 1,
+    "raw_residue": "statutory_veto: attempted path traversal into /etc",
+    "entry": {
+      "timestamp": "2026-09-09T16:25:00Z",
+      "policy_passed": false,
+      "reason": "statutory_veto: attempted path traversal into /etc",
+      "proposal": {
+        "command": "cat /etc/passwd",
+        "target_path": "/etc/passwd"
+      }
+    }
+  },
+  {
+    "seed_id": "seed_unix_sock_abstract_leak_01",
+    "harness_id": "unix_sock_fuzzer",
+    "description": "Probe Linux abstract socket namespace boundary isolation",
+    "parameters": {
+      "sock_type": "dgram",
+      "use_abstract": 1,
+      "pass_descriptor": 0,
+      "socket_name": "dream_abstract_cell_probe",
+      "payload_len": 128
+    },
+    "anomaly_trigger": "abstract_leaked",
+    "expected": "abstract_leaked"
+  },
+  {
+    "seed_id": "seed_unix_sock_scm_rights_fd_02",
+    "harness_id": "unix_sock_fuzzer",
+    "description": "Stress SCM_RIGHTS ancillary descriptor passing through containment cell",
+    "parameters": {
+      "sock_type": "stream",
+      "use_abstract": 0,
+      "pass_descriptor": 1,
+      "socket_name": "dream_scm_rights.sock",
+      "payload_len": 256
+    },
+    "anomaly_trigger": "ancillary_passed",
+    "expected": "ancillary_passed"
+  },
+  {
+    "seed_id": "seed_unix_sock_datagram_truncation_03",
+    "harness_id": "unix_sock_fuzzer",
+    "description": "Push maximum buffer payload to trigger kernel datagram truncation boundary",
+    "parameters": {
+      "sock_type": "dgram",
+      "use_abstract": 0,
+      "pass_descriptor": 0,
+      "socket_name": "dream_trunc_probe.sock",
+      "payload_len": 65536
+    },
+    "anomaly_trigger": "socket_truncated",
+    "expected": "socket_truncated"
+  }
+]
