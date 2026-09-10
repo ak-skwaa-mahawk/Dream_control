@@ -13,6 +13,9 @@ if str(REPO_ROOT) not in sys.path:
 
 import os
 import socket
+import hashlib
+import hmac
+import datetime
 import time
 import tempfile
 import json
@@ -71,7 +74,9 @@ class DreamDaemon:
         phase2_temp: float = 0.2,
         decay_mode: str = "linear",
         decay_alpha: float = 0.5,
-                 telemetry_sock: str | Path | None = None):
+                 telemetry_sock: str | Path | None = None,
+                 attestation_ledger_path: Path | None = None,
+                 attestation_key: str | bytes | None = None):
         self.catalog = catalog
         self.workspace_root = workspace_root
         self.seed_bank_path = seed_bank_path
@@ -97,6 +102,11 @@ class DreamDaemon:
         self.telemetry_sock_path = str(telemetry_sock) if telemetry_sock else None
         self.telemetry_sock: socket.socket | None = None
         self.live_telemetry_seeds: list[dict[str, Any]] = []
+        self.attestation_ledger_path = attestation_ledger_path or (self.seed_bank_path.parent / "attestation_ledger.jsonl")
+        self.attestation_key = (
+            attestation_key.encode("utf-8") if isinstance(attestation_key, str)
+            else attestation_key or os.environ.get("DREAM_ATTESTATION_KEY", "dream_control_master_key_2026").encode("utf-8")
+        )
         self._init_telemetry_socket()
 
     def _init_telemetry_socket(self) -> None:
@@ -201,6 +211,48 @@ class DreamDaemon:
                 pass
         return corpus
 
+    def _sign_and_record_attestation(
+        self,
+        exp: Experiment,
+        verdict: Verdict,
+        traces: list[RawTrace],
+    ) -> dict[str, Any]:
+        payload = {
+            "dream_id": exp.dream_id,
+            "experiment_hash": exp.experiment_hash,
+            "harness_id": exp.harness_id,
+            "parameters": dict(exp.parameters),
+            "k_replicates": self.k_replicates,
+            "decision": verdict.decision,
+            "score": round(float(verdict.score), 4),
+            "novelty": round(float(verdict.novelty), 4),
+            "trace_signatures": sorted([compute_signature(t) for t in traces]),
+            "isolation": dict(traces[0].isolation),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        canonical_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(canonical_bytes).hexdigest()
+        sig = hmac.new(self.attestation_key, canonical_bytes, hashlib.sha256).hexdigest()
+
+        attestation_record = {
+            "version": "1.0",
+            "digest_sha256": digest,
+            "signature_hmac_sha256": sig,
+            "payload": payload,
+        }
+
+        self.attestation_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self.attestation_ledger_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            line = json.dumps(attestation_record) + "\n"
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        logger.info(f"Cryptographic attestation ledgered for dream_id={exp.dream_id} (digest: {digest[:12]}...)")
+        return attestation_record
+
     def _save_corpus(self) -> None:
         self.corpus_path.parent.mkdir(parents=True, exist_ok=True)
         self.corpus_path.write_text(json.dumps(self.corpus._corpus, indent=2), encoding="utf-8")
@@ -304,7 +356,9 @@ class DreamDaemon:
             "k_replicates": self.k_replicates,
         }
 
+        attestation_record = None
         if verdict.decision in ("promote_candidate", "promote_soft"):
+            attestation_record = self._sign_and_record_attestation(exp, verdict, traces)
             existing = {(s["harness_id"], s["signature"]) for s in self.promoted_seeds}
             if (entry["harness_id"], entry["signature"]) not in existing:
                 self.promoted_seeds.append(entry)
@@ -322,6 +376,7 @@ class DreamDaemon:
             "score": verdict.score,
             "trace": traces[0],
             "k_replicates": self.k_replicates,
+            "attestation": attestation_record,
         }
 
 
@@ -340,6 +395,8 @@ def parse_args():
     parser.add_argument("--seed-bank", type=Path, default=Path("seed_bank.json"), help="Seed bank path")
     parser.add_argument("--harness-tree", type=Path, default=Path("harnesses"), help="Harnesses directory")
     parser.add_argument("--max-cycles", type=int, default=1, help="Max cycles to run (0 for infinite loop)")
+    parser.add_argument("--attestation-ledger", type=Path, default=Path("attestation_ledger.jsonl"), help="Append-only signed cryptographic audit ledger path")
+    parser.add_argument("--attestation-key", type=str, default=None, help="Secret signing key for attestation HMAC-SHA256 signatures")
     parser.add_argument("--telemetry-sock", type=str, default=None, help="UNIX datagram socket path (or @abstract) for 79 Hz telemetry streaming")
     parser.add_argument("--sleep-interval", type=float, default=1.0, help="Idle sleep interval between cycles in seconds")
     return parser.parse_args()
@@ -384,6 +441,8 @@ if __name__ == "__main__":
         tau=args.tau,
         consensus_threshold=args.consensus_threshold,
                                       telemetry_sock=args.telemetry_sock,
+                                      attestation_ledger_path=args.attestation_ledger,
+                                      attestation_key=args.attestation_key,
         phase1_temp=args.temp_diverge,
         phase2_temp=args.temp_converge,
         require_isolation=args.require_isolation,
