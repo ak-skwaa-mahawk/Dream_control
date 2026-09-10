@@ -11,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1 if "scripts" in str(__file__) or 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import asyncio
 import os
 import socket
 import hashlib
@@ -546,7 +547,39 @@ def parse_args():
     parser.add_argument("--attestation-key", type=str, default=None, help="Secret signing key for attestation HMAC-SHA256 signatures")
     parser.add_argument("--telemetry-sock", type=str, default=None, help="UNIX datagram socket path (or @abstract) for 79 Hz telemetry streaming")
     parser.add_argument("--sleep-interval", type=float, default=1.0, help="Idle sleep interval between cycles in seconds")
+    parser.add_argument("--async", dest="async_mode", action="store_true", help="Run daemon cycles asynchronously with non-blocking ingress and replicate parallelism")
     return parser.parse_args()
+
+
+async def _async_main_loop(args, daemon: DreamDaemon) -> None:
+    async_server = None
+    if args.telemetry_sock:
+        # Avoid bind conflict with synchronous daemon socket by closing synchronous one first
+        if daemon.telemetry_sock:
+            daemon.telemetry_sock.close()
+            daemon.telemetry_sock = None
+        async_server = AsyncTelemetryServer(socket_path=Path(args.telemetry_sock))
+        await async_server.start()
+
+    cycle_count = 0
+    try:
+        while True:
+            cycle_count += 1
+            logger.info(f"--- Starting Async DreamDaemon Cycle #{cycle_count} ---")
+            result = await daemon.async_run_cycle(async_server=async_server)
+            if result is None:
+                logger.warning(f"Async cycle #{cycle_count} yielded no valid candidate.")
+            else:
+                print(f"Async cycle #{cycle_count} execution complete. Decision: {result.get('decision')} (score: {result.get('score', 0.0):.2f})")
+            if args.max_cycles > 0 and cycle_count >= args.max_cycles:
+                break
+            if args.sleep_interval > 0:
+                await asyncio.sleep(args.sleep_interval)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Async daemon interrupted by operator; exiting cleanly.")
+    finally:
+        if async_server:
+            async_server.close()
 
 
 if __name__ == "__main__":
@@ -597,21 +630,27 @@ if __name__ == "__main__":
         decay_alpha=args.decay_alpha,
     )
 
-    cycle_count = 0
-    try:
-        while True:
-            cycle_count += 1
-            logger.info(f"--- Starting DreamDaemon Cycle #{cycle_count} ---")
-            result = daemon.run_cycle()
-            if result is None:
-                logger.warning(f"Cycle #{cycle_count} yielded no valid candidate.")
-            else:
-                print(f"Cycle #{cycle_count} execution complete. Decision: {result.get('decision')} (score: {result.get('score', 0.0):.2f})")
-            if args.max_cycles > 0 and cycle_count >= args.max_cycles:
-                break
-            if args.sleep_interval > 0:
-                time.sleep(args.sleep_interval)
-    except KeyboardInterrupt:
-        logger.info("Daemon interrupted by operator; exiting cleanly.")
-    finally:
-        daemon.close()
+    if args.async_mode:
+        try:
+            asyncio.run(_async_main_loop(args, daemon))
+        finally:
+            daemon.close()
+    else:
+        cycle_count = 0
+        try:
+            while True:
+                cycle_count += 1
+                logger.info(f"--- Starting DreamDaemon Cycle #{cycle_count} ---")
+                result = daemon.run_cycle()
+                if result is None:
+                    logger.warning(f"Cycle #{cycle_count} yielded no valid candidate.")
+                else:
+                    print(f"Cycle #{cycle_count} execution complete. Decision: {result.get('decision')} (score: {result.get('score', 0.0):.2f})")
+                if args.max_cycles > 0 and cycle_count >= args.max_cycles:
+                    break
+                if args.sleep_interval > 0:
+                    time.sleep(args.sleep_interval)
+        except KeyboardInterrupt:
+            logger.info("Daemon interrupted by operator; exiting cleanly.")
+        finally:
+            daemon.close()
