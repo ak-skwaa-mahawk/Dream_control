@@ -26,9 +26,10 @@ from typing import Callable, Mapping, Any
 from core.dream_contract import HarnessSpec, Experiment, RawTrace, Verdict
 from core.dream_scheduler import schedule_next_dream
 from core.dreamer import generate_experiment
-from core.warden import execute_in_cell
+from core.warden import execute_in_cell, async_execute_replicates
 from core.dream_evaluator import SignatureCorpus, evaluate_traces, compute_signature
 from core.experiment_validator import decode_params
+from core.async_ingress import AsyncTelemetryServer
 from core.telemetry_seed import collect_all_seeds, extract_log_seeds, write_seed_bank
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -172,6 +173,144 @@ class DreamDaemon:
             logger.info(f"Drained {ingested} live telemetry packet(s) from UNIX datagram socket")
             self._save_json_list(self.promoted_seeds, self.seed_bank_path)
         return ingested
+
+
+    async def async_drain_telemetry(self, async_server: AsyncTelemetryServer | None = None) -> int:
+        if async_server is None:
+            return self.drain_telemetry()
+        batch = await async_server.drain_batch(max_items=512, timeout_s=0.01)
+        for entry in batch:
+            reason = entry.get("reason") or entry.get("anomaly_trigger") or "telemetry_stream_record"
+            raw_res = entry.get("residue") or json.dumps(entry)
+            seed = {
+                "harness_id": entry.get("harness_id", "mcp_server_fuzzer"),
+                "failure_type": "telemetry_anomaly",
+                "reason": reason,
+                "raw_residue": str(raw_res)[:512],
+                "source": "async_telemetry_stream",
+            }
+            self.live_telemetry_seeds.append(seed)
+        return len(batch)
+
+    async def async_run_cycle(self, async_server: AsyncTelemetryServer | None = None) -> dict[str, Any] | None:
+        await self.async_drain_telemetry(async_server)
+
+        outliers: list[dict[str, Any]] = []
+        if self.log_dir or self.audit_path:
+            log_d = self.log_dir or Path("/nonexistent/log/dir")
+            audit_f = self.audit_path or Path("/nonexistent/audit.jsonl")
+            outliers = collect_all_seeds(log_dir=log_d, audit_path=audit_f)
+
+        mutation_candidates = self.promoted_seeds + self.flaky_seeds
+        plan = schedule_next_dream(mutation_candidates, self.catalog, outliers)
+        mode = plan["mode"]
+        logger.info(f"Dispatching cycle with mode: {mode}")
+
+        exp: Experiment
+        if mode == "telemetry_perturbation":
+            try:
+                exp = generate_experiment(plan["seed_data"], self.catalog, self.llm_callable)
+            except Exception as e:
+                logger.warning(f"Generation failed for telemetry seed: {e}")
+                return None
+        else:
+            hid = plan["harness_id"]
+            spec = self.catalog[hid]
+            try:
+                validated = decode_params(spec, plan["parameters"])
+            except Exception as e:
+                logger.warning(f"Hot-path parameter validation failed: {e}")
+                return None
+
+            budget = compute_experiment_budget_ms(spec, validated)
+            exp = Experiment(
+                dream_id=f"dream_{int(time.time()*1000)}",
+                harness_id=hid,
+                parameters=validated,
+                expected=derive_expected_observable(spec),
+                unexpected=("panic",),
+                budget_ms=budget,
+            )
+
+        spec = self.catalog[exp.harness_id]
+        charter_fd: int | None = None
+        pass_fds = ()
+        extra_env = {}
+        if self.charter_path and self.charter_path.is_file():
+            try:
+                charter_fd = os.open(str(self.charter_path), os.O_RDONLY)
+                pass_fds = (charter_fd,)
+                extra_env["ADMISSION_GATE_CHARTER_FD"] = str(charter_fd)
+            except OSError:
+                pass
+
+        try:
+            traces = await async_execute_replicates(
+                spec=spec,
+                validated_params=dict(exp.parameters),
+                budget_ms=exp.budget_ms,
+                workspace_root=self.workspace_root,
+                harness_tree=self.harness_tree,
+                k=self.k_replicates,
+                pass_fds=pass_fds,
+                extra_env=extra_env,
+                require_isolation=self.require_isolation,
+            )
+        finally:
+            if charter_fd is not None:
+                try:
+                    os.close(charter_fd)
+                except OSError:
+                    pass
+
+        sig0 = compute_signature(traces[0])
+        novelty = self.corpus.get_novelty(exp.harness_id, sig0)
+        verdict = evaluate_traces(exp, traces, novelty=novelty, tau=self.tau, require_isolation=self.require_isolation)
+
+        self.corpus.record(exp.harness_id, sig0)
+        self._save_corpus()
+
+        logger.info(
+            f"Cycle completed: decision={verdict.decision} score={verdict.score:.2f} novelty={verdict.novelty:.2f}"
+        )
+
+        entry = {
+            "experiment_hash": exp.experiment_hash,
+            "harness_id": exp.harness_id,
+            "parameters": dict(exp.parameters),
+            "expected": exp.expected,
+            "traces": [
+                {
+                    "exit_code": t.exit_code,
+                    "wall_ms": t.wall_ms,
+                    "probes": dict(t.probes),
+                    "stdout_hash": t.stdout_hash,
+                    "stderr_hash": t.stderr_hash,
+                    "signal": t.signal,
+                    "max_rss_kb": t.max_rss_kb,
+                    "isolation": dict(t.isolation),
+                }
+                for t in traces
+            ],
+            "novelty": verdict.novelty,
+            "score": verdict.score,
+            "decision": verdict.decision,
+            "timestamp": time.time(),
+        }
+
+        if verdict.decision == "promote_candidate":
+            self.promoted_seeds.append(entry)
+            self._sign_and_record_attestation(exp, verdict, traces)
+        elif verdict.decision == "flaky":
+            self.flaky_seeds.append(entry)
+
+        return {
+            "dream_id": exp.dream_id,
+            "decision": verdict.decision,
+            "score": verdict.score,
+            "novelty": verdict.novelty,
+            "replicates": len(traces),
+        }
 
     def close(self) -> None:
         if self.telemetry_sock:
