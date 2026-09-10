@@ -25,7 +25,7 @@ class TestMCPServerHarness(unittest.TestCase):
             "timeout_s": 0.5,
         }
         res = simulate_mcp_rpc_call(params, self.workspace)
-        self.assertEqual(res["observable"], "intra_vires_confirmed")
+        self.assertEqual(res["signal"], "intra_vires_confirmed")
 
     def test_path_traversal_triggers_statutory_veto(self):
         traversals = [
@@ -37,7 +37,7 @@ class TestMCPServerHarness(unittest.TestCase):
         for t in traversals:
             params = {"method": "resources/read", "uri": t, "payload_size_kb": 1, "timeout_s": 0.5}
             res = simulate_mcp_rpc_call(params, self.workspace)
-            self.assertEqual(res["observable"], "statutory_veto_reached", f"Failed for {t}")
+            self.assertEqual(res["signal"], "statutory_veto_reached", f"Failed for {t}")
 
     def test_null_byte_injection_triggers_statutory_veto(self):
         params = {
@@ -47,7 +47,7 @@ class TestMCPServerHarness(unittest.TestCase):
             "timeout_s": 0.5,
         }
         res = simulate_mcp_rpc_call(params, self.workspace)
-        self.assertEqual(res["observable"], "statutory_veto_reached")
+        self.assertEqual(res["signal"], "statutory_veto_reached")
 
     def test_payload_exhaustion_triggers_statutory_veto(self):
         params = {
@@ -57,7 +57,7 @@ class TestMCPServerHarness(unittest.TestCase):
             "timeout_s": 0.5,
         }
         res = simulate_mcp_rpc_call(params, self.workspace)
-        self.assertEqual(res["observable"], "statutory_veto_reached")
+        self.assertEqual(res["signal"], "statutory_veto_reached")
 
     def test_tight_timeout_triggers_admission_timeout(self):
         params = {
@@ -67,7 +67,7 @@ class TestMCPServerHarness(unittest.TestCase):
             "timeout_s": 0.001,
         }
         res = simulate_mcp_rpc_call(params, self.workspace)
-        self.assertEqual(res["observable"], "admission_timeout")
+        self.assertEqual(res["signal"], "admission_timeout")
 
     def test_unknown_rpc_method_triggers_rpc_error(self):
         params = {
@@ -77,7 +77,7 @@ class TestMCPServerHarness(unittest.TestCase):
             "timeout_s": 0.5,
         }
         res = simulate_mcp_rpc_call(params, self.workspace)
-        self.assertEqual(res["observable"], "rpc_error")
+        self.assertEqual(res["signal"], "rpc_error")
 
     def test_cli_execution_integration(self):
         harness_path = Path(__file__).resolve().parents[1] / "harnesses" / "mcp_server_harness.py"
@@ -89,7 +89,7 @@ class TestMCPServerHarness(unittest.TestCase):
             check=True,
         )
         data = json.loads(proc.stdout.strip())
-        self.assertEqual(data["observable"], "statutory_veto_reached")
+        self.assertEqual(data["signal"], "statutory_veto_reached")
 
 
 if __name__ == "__main__":
