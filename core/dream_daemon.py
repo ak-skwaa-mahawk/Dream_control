@@ -55,8 +55,8 @@ class DreamDaemon:
         catalog: Mapping[str, HarnessSpec],
         workspace_root: Path,
         seed_bank_path: Path,
-        llm_callable: Callable[[str, float], str],
-        harness_tree: Path,
+        llm_callable: Callable[[str, float], str] | None = None,
+        harness_tree: Path = Path("harnesses"),
         corpus_path: Path | None = None,
         flaky_bank_path: Path | None = None,
         log_dir: Path | None = None,
@@ -68,7 +68,8 @@ class DreamDaemon:
         consensus_threshold: float = 0.67,
         phase1_temp: float = 1.1,
         phase2_temp: float = 0.2,
-    ):
+        decay_mode: str = "linear",
+        decay_alpha: float = 0.5):
         self.catalog = catalog
         self.workspace_root = workspace_root
         self.seed_bank_path = seed_bank_path
@@ -86,6 +87,8 @@ class DreamDaemon:
         self.phase1_temp = float(phase1_temp)
         self.phase2_temp = float(phase2_temp)
 
+        self.decay_mode = decay_mode
+        self.decay_alpha = float(decay_alpha)
         self.corpus = self._load_corpus()
         self.promoted_seeds: list[dict[str, Any]] = self._load_json_list(self.seed_bank_path)
         self.flaky_seeds: list[dict[str, Any]] = self._load_json_list(self.flaky_bank_path)
@@ -104,7 +107,7 @@ class DreamDaemon:
         write_seed_bank(data, path)
 
     def _load_corpus(self) -> SignatureCorpus:
-        corpus = SignatureCorpus()
+        corpus = SignatureCorpus(decay_mode=self.decay_mode, alpha=self.decay_alpha)
         if self.corpus_path.is_file():
             try:
                 raw = json.loads(self.corpus_path.read_text(encoding="utf-8"))
@@ -244,6 +247,8 @@ def parse_args():
     parser.add_argument("--k-replicates", type=int, default=3, help="Replicates per candidate (K >= 1)")
     parser.add_argument("--tau", type=float, default=2.0, help="Verdict score threshold for promotion")
     parser.add_argument("--consensus-threshold", type=float, default=0.67, help="Pairwise Jaccard threshold floor (0.0 - 1.0)")
+    parser.add_argument("--decay-mode", type=str, choices=["linear", "steep_exponential"], default="linear", help="Corpus novelty decay formula mode")
+    parser.add_argument("--decay-alpha", type=float, default=0.5, help="Saturation penalty parameter alpha for exponential decay")
     parser.add_argument("--temp-diverge", type=float, default=1.1, help="Phase 1 speculative divergence temperature")
     parser.add_argument("--temp-converge", type=float, default=0.2, help="Phase 2 structured schema convergence temperature")
     parser.add_argument("--require-isolation", action="store_true", help="Enforce hermetic sandbox isolation")
@@ -296,6 +301,8 @@ if __name__ == "__main__":
         phase1_temp=args.temp_diverge,
         phase2_temp=args.temp_converge,
         require_isolation=args.require_isolation,
+        decay_mode=args.decay_mode,
+        decay_alpha=args.decay_alpha,
     )
 
     cycle_count = 0

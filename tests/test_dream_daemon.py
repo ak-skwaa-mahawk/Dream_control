@@ -152,5 +152,39 @@ class TestDreamDaemon(unittest.TestCase):
         self.assertEqual(daemon.phase1_temp, 1.3)
         self.assertEqual(daemon.phase2_temp, 0.1)
 
+    def test_decay_mode_and_alpha_honored(self):
+        from core.dream_contract import DEFAULT_CATALOG
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ws = Path(tmpdir) / "ws"
+            sb = Path(tmpdir) / "seed_bank.json"
+            daemon = DreamDaemon(
+                catalog=DEFAULT_CATALOG,
+                workspace_root=ws,
+                seed_bank_path=sb,
+                decay_mode="steep_exponential",
+                decay_alpha=0.75,
+            )
+            self.assertEqual(daemon.decay_mode, "steep_exponential")
+            self.assertEqual(daemon.decay_alpha, 0.75)
+            self.assertEqual(daemon.corpus.decay_mode, "steep_exponential")
+            self.assertEqual(daemon.corpus.alpha, 0.75)
+
+    def test_parse_args_decay_parameters(self):
+        from core.dream_daemon import parse_args
+        import sys
+        orig_argv = sys.argv
+        try:
+            sys.argv = [
+                "dream_daemon.py",
+                "--decay-mode", "steep_exponential",
+                "--decay-alpha", "1.2",
+            ]
+            args = parse_args()
+            self.assertEqual(args.decay_mode, "steep_exponential")
+            self.assertEqual(args.decay_alpha, 1.2)
+        finally:
+            sys.argv = orig_argv
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
