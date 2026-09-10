@@ -22,6 +22,14 @@ Observable = Literal[
     "panic",
     "drift",
     "cross_tenant_leak",
+    "socket_bound",
+    "ancillary_passed",
+    "abstract_leaked",
+    "descriptor_vetoed",
+    "socket_truncated",
+    "connection_refused",
+    "permission_denied",
+    "protocol_error",
 ]
 
 
@@ -148,7 +156,29 @@ PATH_ESCAPE_SPEC = HarnessSpec(
     runner_binary=Path("harnesses/path_escape_fuzzer.py"),
 )
 
+UNIX_SOCK_SPEC = HarnessSpec(
+    harness_id="unix_sock_fuzzer",
+    target_subsystem="ipc_socket_cell",
+    params={
+        "payload_len": ParamSpec(kind="int", lo=0.0, hi=65536.0),
+        "use_abstract": ParamSpec(kind="int", lo=0.0, hi=1.0),
+        "pass_descriptor": ParamSpec(kind="int", lo=0.0, hi=1.0),
+    },
+    allowed_observables=frozenset({
+        "socket_bound",
+        "ancillary_passed",
+        "abstract_leaked",
+        "descriptor_vetoed",
+        "socket_truncated",
+        "connection_refused",
+        "permission_denied",
+        "protocol_error",
+    }),
+    runner_binary=Path("harnesses/unix_sock_fuzzer.py"),
+)
+
 DEFAULT_CATALOG: dict[str, HarnessSpec] = {
+    "unix_sock_fuzzer": UNIX_SOCK_SPEC,
     "admission_gate_policy": ADMISSION_GATE_SPEC,
     "process_fuzzer": PROCESS_FUZZER_SPEC,
     "path_escape_fuzzer": PATH_ESCAPE_SPEC,
