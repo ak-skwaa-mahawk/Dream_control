@@ -324,5 +324,18 @@ class TestInvariantsAndHardening(unittest.TestCase):
                 warden.DEFAULT_CGROUP2_ROOT = orig_root
 
 
+    def test_cgroup_v2_memory_events_throttle_accounting(self):
+        import core.warden as warden
+        with tempfile.TemporaryDirectory() as tmp_cg_root:
+            cg_dir = Path(tmp_cg_root) / "cell_events"
+            cg_dir.mkdir(parents=True, exist_ok=True)
+            events_file = cg_dir / "memory.events"
+            events_file.write_text("low 0\nhigh 4\nmax 1\noom 0\noom_kill 0\n", encoding="utf-8")
+
+            events = warden._read_cgroup_memory_events(cg_dir)
+            self.assertEqual(events.get("high"), 4)
+            self.assertEqual(events.get("max"), 1)
+            self.assertEqual(events.get("oom"), 0)
+
 if __name__ == "__main__":
     unittest.main()

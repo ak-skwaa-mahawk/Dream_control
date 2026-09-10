@@ -226,6 +226,22 @@ def _try_setup_cgroup(
         return None, False
 
 
+def _read_cgroup_memory_events(cg_path: Path | None) -> dict[str, int]:
+    events: dict[str, int] = {}
+    if not cg_path:
+        return events
+    events_file = cg_path / "memory.events"
+    try:
+        if events_file.is_file():
+            for line in events_file.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    events[parts[0]] = int(parts[1])
+    except (OSError, ValueError):
+        pass
+    return events
+
+
 def _read_cgroup_peak_kb(cg_path: Path | None) -> int:
     if not cg_path:
         return 0
@@ -483,6 +499,11 @@ def _execute_host_landlock(
                 proc.stderr.close()
 
     max_rss_kb = _read_cgroup_peak_kb(cg_path) if has_cg else 0
+    cg_events = _read_cgroup_memory_events(cg_path) if has_cg else {}
+    if cg_events:
+        isolation_audit["cgroup_events"] = cg_events
+        if cg_events.get("high", 0) > 0:
+            isolation_audit["memory_throttled"] = True
     _cleanup_cgroup(cg_path)
 
     if exit_code is not None and exit_code != 124:
