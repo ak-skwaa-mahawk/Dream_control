@@ -27,6 +27,10 @@ from core.dream_contract import HarnessSpec, RawTrace, SecurityViolation
 MAX_STDIO_BYTES = 64 * 1024
 DEFAULT_MEM_MAX_BYTES = 128 * 1024 * 1024  # 128MB ceiling
 DEFAULT_CGROUP2_ROOT = Path("/sys/fs/cgroup")
+DEFAULT_MEM_MAX_BYTES = 128 * 1024 * 1024  # 128MB hard ceiling
+DEFAULT_MEM_HIGH_BYTES = 96 * 1024 * 1024  # 96MB proactive throttling threshold
+DEFAULT_PIDS_MAX = 32                      # Strict anti-fork-bomb ceiling
+DEFAULT_CPU_MAX_SPEC = "50000 100000"     # 0.5 core quota (50ms / 100ms)
 HARD_MAX_BUDGET_MS = 5000  # Universal warden ceiling
 
 ALLOWED_EXTRA_ENV = frozenset([
@@ -187,22 +191,36 @@ def _apply_landlock(run_dir: Path, harness_path: Path) -> bool:
         return False
 
 
-def _try_setup_cgroup(cell_id: str, mem_max: int = DEFAULT_MEM_MAX_BYTES) -> tuple[Path | None, bool]:
+def _try_setup_cgroup(
+    cell_id: str,
+    mem_max: int = DEFAULT_MEM_MAX_BYTES,
+    mem_high: int = DEFAULT_MEM_HIGH_BYTES,
+    pids_max: int = DEFAULT_PIDS_MAX,
+    cpu_max_spec: str = DEFAULT_CPU_MAX_SPEC,
+) -> tuple[Path | None, bool]:
     if not DEFAULT_CGROUP2_ROOT.is_dir():
         return None, False
 
     cg_path = DEFAULT_CGROUP2_ROOT / "dream_warden" / cell_id
     try:
         cg_path.mkdir(parents=True, exist_ok=True)
+
+        high_file = cg_path / "memory.high"
+        if high_file.exists():
+            high_file.write_text(str(mem_high), encoding="utf-8")
+
         max_file = cg_path / "memory.max"
         if max_file.exists():
             max_file.write_text(str(mem_max), encoding="utf-8")
+
         pids_file = cg_path / "pids.max"
         if pids_file.exists():
-            pids_file.write_text("64", encoding="utf-8")
+            pids_file.write_text(str(pids_max), encoding="utf-8")
+
         cpu_file = cg_path / "cpu.max"
         if cpu_file.exists():
-            cpu_file.write_text("50000 100000", encoding="utf-8")
+            cpu_file.write_text(cpu_max_spec, encoding="utf-8")
+
         return cg_path, True
     except (OSError, PermissionError):
         return None, False
@@ -225,6 +243,12 @@ def _cleanup_cgroup(cg_path: Path | None) -> None:
     if not cg_path:
         return
     try:
+        kill_file = cg_path / "cgroup.kill"
+        if kill_file.is_file():
+            try:
+                kill_file.write_text("1", encoding="utf-8")
+            except OSError:
+                pass
         for _ in range(5):
             try:
                 cg_path.rmdir()

@@ -293,5 +293,36 @@ class TestInvariantsAndHardening(unittest.TestCase):
             self.assertEqual(decoded.get("authorized_actions"), ["SHELL_EXEC"])
             self.assertFalse(any(arg.startswith("ADMISSION_GATE_CHARTER_FD=") for arg in run_cmd))
 
+    def test_cgroup_v2_ceilings_and_cleanup(self):
+        import core.warden as warden
+        with tempfile.TemporaryDirectory() as tmp_cg_root:
+            orig_root = warden.DEFAULT_CGROUP2_ROOT
+            try:
+                warden.DEFAULT_CGROUP2_ROOT = Path(tmp_cg_root)
+                cg_dir = warden.DEFAULT_CGROUP2_ROOT / "dream_warden" / "test_cell_123"
+                cg_dir.mkdir(parents=True, exist_ok=True)
+                for f in ("memory.high", "memory.max", "pids.max", "cpu.max", "cgroup.kill"):
+                    (cg_dir / f).touch()
+
+                cg_path, ok = warden._try_setup_cgroup(
+                    cell_id="test_cell_123",
+                    mem_max=64 * 1024 * 1024,
+                    mem_high=48 * 1024 * 1024,
+                    pids_max=16,
+                    cpu_max_spec="25000 100000",
+                )
+                self.assertTrue(ok)
+                self.assertIsNotNone(cg_path)
+                self.assertEqual((cg_path / "memory.max").read_text(), str(64 * 1024 * 1024))
+                self.assertEqual((cg_path / "memory.high").read_text(), str(48 * 1024 * 1024))
+                self.assertEqual((cg_path / "pids.max").read_text(), "16")
+                self.assertEqual((cg_path / "cpu.max").read_text(), "25000 100000")
+
+                warden._cleanup_cgroup(cg_path)
+                self.assertEqual((cg_path / "cgroup.kill").read_text(), "1")
+            finally:
+                warden.DEFAULT_CGROUP2_ROOT = orig_root
+
+
 if __name__ == "__main__":
     unittest.main()
