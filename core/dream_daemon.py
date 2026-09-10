@@ -5,8 +5,15 @@ Autonomous idle runner with K>=3 replication, flaky seed quarantine,
 persistent signature corpus tracking, descriptor pinning, and hot-path validation.
 """
 
+import sys
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parents[1 if "scripts" in str(__file__) or "core" in str(__file__) else 0]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import os
 import time
+import tempfile
 import json
 import logging
 from pathlib import Path
@@ -240,7 +247,7 @@ def parse_args():
     parser.add_argument("--temp-diverge", type=float, default=1.1, help="Phase 1 speculative divergence temperature")
     parser.add_argument("--temp-converge", type=float, default=0.2, help="Phase 2 structured schema convergence temperature")
     parser.add_argument("--require-isolation", action="store_true", help="Enforce hermetic sandbox isolation")
-    parser.add_argument("--workspace", type=Path, default=Path("/tmp/dream_workspace"), help="Workspace root")
+    parser.add_argument("--workspace", type=Path, default=Path(tempfile.gettempdir()) / "dream_workspace", help="Workspace root")
     parser.add_argument("--seed-bank", type=Path, default=Path("seed_bank.json"), help="Seed bank path")
     parser.add_argument("--harness-tree", type=Path, default=Path("harnesses"), help="Harnesses directory")
     return parser.parse_args()
@@ -249,3 +256,45 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     print(f"Daemon configured: K={args.k_replicates}, tau={args.tau}, Jaccard_floor={args.consensus_threshold}, T1={args.temp_diverge}, T2={args.temp_converge}")
+
+    # Build catalog from contract
+    try:
+        from core.dream_contract import DEFAULT_CATALOG as catalog
+    except ImportError:
+        import core.dream_contract as dc
+        catalog = {
+            v.harness_id: v for k, v in vars(dc).items()
+            if isinstance(v, dc.HarnessSpec)
+        }
+
+    # Deterministic local synthesis fallback for CLI test runs
+    def cli_mock_llm(prompt: str, temperature: float) -> str:
+        if "Phase 1" in prompt:
+            return "Hypothesis: anomalous input violates boundary constraints."
+        if "process_fuzzer" in prompt:
+            return json.dumps({"concurrency": 2, "timeout_s": 0.05})
+        if "admission_gate_policy" in prompt:
+            return json.dumps({"command": "cat /etc/passwd", "target_path": "/etc/passwd"})
+        return json.dumps({
+            "target_path": "/etc/passwd",
+            "mode": "read",
+            "use_symlink": False,
+            "null_byte_inject": False,
+        })
+
+    daemon = DreamDaemon(
+        catalog=catalog,
+        workspace_root=args.workspace,
+        seed_bank_path=args.seed_bank,
+        llm_callable=cli_mock_llm,
+        harness_tree=args.harness_tree,
+        k_replicates=args.k_replicates,
+        tau=args.tau,
+        consensus_threshold=args.consensus_threshold,
+        phase1_temp=args.temp_diverge,
+        phase2_temp=args.temp_converge,
+        require_isolation=args.require_isolation,
+    )
+
+    result = daemon.run_cycle()
+    print(f"Cycle execution complete. Decision: {result}")

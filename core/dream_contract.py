@@ -98,3 +98,58 @@ class CharterTransportType(str, Enum):
     FD_INHERIT = "fd"
     ENV_INLINE = "env_inline"
     SOCKET_STREAM = "socket"
+
+ADMISSION_GATE_SPEC = HarnessSpec(
+    harness_id="admission_gate_policy",
+    target_subsystem="admission_gate",
+    params={
+        "command": ParamSpec(kind="str", lo=1.0, hi=256.0),
+        "target_path": ParamSpec(kind="str", lo=1.0, hi=256.0),
+    },
+    allowed_observables=frozenset({
+        "intra_vires_confirmed",
+        "statutory_veto_reached",
+        "ultra_vires_detected",
+    }),
+    runner_binary=Path("harnesses/admission_gate_harness.py"),
+)
+
+PROCESS_FUZZER_SPEC = HarnessSpec(
+    harness_id="process_fuzzer",
+    target_subsystem="process_lifecycle",
+    params={
+        "concurrency": ParamSpec(kind="int", lo=1.0, hi=32.0),
+        "timeout_s": ParamSpec(kind="float", lo=0.001, hi=5.0),
+    },
+    allowed_observables=frozenset({
+        "intra_vires_confirmed",
+        "admission_timeout",
+        "statutory_veto_reached",
+    }),
+    runner_binary=Path("harnesses/process_fuzzer.py"),
+)
+
+PATH_ESCAPE_SPEC = HarnessSpec(
+    harness_id="path_escape_fuzzer",
+    target_subsystem="filesystem_isolation",
+    params={
+        "target_path": ParamSpec(kind="str", lo=1.0, hi=256.0),
+        "mode": ParamSpec(kind="str", lo=1.0, hi=16.0),
+        "use_symlink": ParamSpec(kind="int", lo=0.0, hi=1.0),
+        "null_byte_inject": ParamSpec(kind="int", lo=0.0, hi=1.0),
+    },
+    allowed_observables=frozenset({
+        "intra_vires_confirmed",
+        "statutory_veto_reached",
+        "ultra_vires_detected",
+        "path_traversal_blocked",
+        "symlink_containment_verified",
+    }),
+    runner_binary=Path("harnesses/path_escape_fuzzer.py"),
+)
+
+DEFAULT_CATALOG: dict[str, HarnessSpec] = {
+    "admission_gate_policy": ADMISSION_GATE_SPEC,
+    "process_fuzzer": PROCESS_FUZZER_SPEC,
+    "path_escape_fuzzer": PATH_ESCAPE_SPEC,
+}

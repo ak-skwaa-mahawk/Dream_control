@@ -5,6 +5,12 @@ Tails admission-gate audit_log.jsonl and ingests real-time telemetry anomaly see
 into seed_bank.json for DreamDaemon synthesis.
 """
 
+import sys
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parents[1 if "scripts" in str(__file__) or "core" in str(__file__) else 0]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import argparse
 import json
 import logging
@@ -127,9 +133,10 @@ def parse_args():
     parser.add_argument("--audit-log", type=Path, default=Path("audit_log.jsonl"), help="Path to audit_log.jsonl")
     parser.add_argument("--seed-bank", type=Path, default=Path("seed_bank.json"), help="Destination seed bank")
     parser.add_argument("--poll-interval", type=float, default=0.5, help="Polling interval in seconds")
+    parser.add_argument("--from-start", action="store_true", help="Read log from start instead of tailing end")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    tail_audit_log(args.audit_log, args.seed_bank, poll_interval_s=args.poll_interval)
+    tail_audit_log(args.audit_log, args.seed_bank, poll_interval_s=args.poll_interval, seek_to_end=not args.from_start)
