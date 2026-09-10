@@ -1,3 +1,4 @@
+import asyncio
 import base64
 #!/usr/bin/env python3
 """
@@ -320,6 +321,19 @@ def _read_bounded_pipes(proc: subprocess.Popen, timeout_sec: float) -> tuple[byt
     return bytes(stdout_buf), bytes(stderr_buf), timed_out
 
 
+async def _read_bounded_async_stream(reader: asyncio.StreamReader | None, max_bytes: int = MAX_STDIO_BYTES) -> bytes:
+    if reader is None:
+        return b""
+    buf = bytearray()
+    while len(buf) < max_bytes:
+        chunk = await reader.read(4096)
+        if not chunk:
+            break
+        avail = max_bytes - len(buf)
+        buf.extend(chunk[:avail])
+    return bytes(buf)
+
+
 def _execute_host_landlock(
     spec: HarnessSpec,
     validated_params: Mapping[str, Any],
@@ -547,11 +561,262 @@ def _execute_host_landlock(
     )
 
 
+
+
+async def _async_execute_host_landlock(
+    spec: HarnessSpec,
+    validated_params: Mapping[str, Any],
+    budget_ms: int,
+    workspace_root: Path,
+    harness_tree: Path,
+    pass_fds: tuple[int, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
+    require_isolation: bool = False,
+) -> RawTrace:
+    resolved_binary = spec.runner_binary.resolve()
+    resolved_tree = harness_tree.resolve()
+
+    try:
+        resolved_binary.relative_to(resolved_tree)
+    except ValueError:
+        raise SecurityViolation(
+            f"Security violation: binary {resolved_binary} outside harness tree {resolved_tree}"
+        )
+
+    effective_budget_ms = min(budget_ms, HARD_MAX_BUDGET_MS)
+
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(workspace_root, 0o700)
+    except OSError:
+        pass
+
+    run_id = f"cell_async_{int(time.time() * 1e6)}_{os.getpid()}"
+    run_dir = workspace_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(run_dir, 0o700)
+
+    params_path = run_dir / "params.json"
+    out_path = run_dir / "out.json"
+    params_path.write_text(json.dumps(validated_params), encoding="utf-8")
+
+    if resolved_binary.suffix == ".py":
+        base_cmd = [sys.executable, "-I", str(resolved_binary), "--params", str(params_path), "--out", str(out_path)]
+    else:
+        base_cmd = [str(resolved_binary), "--params", str(params_path), "--out", str(out_path)]
+
+    cmd = list(base_cmd)
+    isolation_audit = {
+        "unshare": False,
+        "cgroup": False,
+        "landlock": False,
+        "session": True,
+    }
+
+    unshare_bin = "/usr/bin/unshare"
+    has_unshare = False
+    if os.path.isfile(unshare_bin) and os.access(unshare_bin, os.X_OK):
+        probe = subprocess.run([unshare_bin, "-r", "--fork", "--pid", "true"], capture_output=True)
+        if probe.returncode == 0:
+            cg_flag = ["--cgroup"] if subprocess.run([unshare_bin, "--help"], capture_output=True).stdout.find(b"--cgroup") != -1 else []
+            cmd = [unshare_bin, "-r", "--fork", "--pid", "--mount-proc", "--net", "--ipc", "--uts", "--mount"] + cg_flag + base_cmd
+            has_unshare = True
+            isolation_audit["unshare"] = True
+
+    cg_path, has_cg = _try_setup_cgroup(run_id)
+    isolation_audit["cgroup"] = has_cg
+
+    if require_isolation and not (has_unshare and HAS_LANDLOCK and has_cg):
+        try:
+            params_path.unlink(missing_ok=True)
+            out_path.unlink(missing_ok=True)
+            run_dir.rmdir()
+        except OSError:
+            pass
+        missing = [k for k, v in [("unshare", has_unshare), ("landlock", HAS_LANDLOCK), ("cgroup", has_cg)] if not v]
+        raise SecurityViolation(f"Host environment failed required isolation guarantees: {missing}")
+
+    clean_env = {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONHASHSEED": "0",
+    }
+    if extra_env:
+        for k, v in extra_env.items():
+            if k in ALLOWED_EXTRA_ENV:
+                clean_env[k] = v
+
+    status_r, status_w = os.pipe()
+
+    def _preexec_init():
+        try:
+            if has_cg and cg_path:
+                try:
+                    (cg_path / "cgroup.procs").write_text(str(os.getpid()), encoding="utf-8")
+                except OSError:
+                    pass
+            ll_ok = False
+            if HAS_LANDLOCK:
+                ll_ok = _apply_landlock(run_dir, resolved_binary)
+            os.write(status_w, b"1" if ll_ok else b"0")
+        except Exception:
+            os.write(status_w, b"0")
+        finally:
+            try:
+                os.close(status_w)
+            except OSError:
+                pass
+
+    timeout_sec = max(0.01, effective_budget_ms / 1000.0)
+    stdout_bytes = b""
+    stderr_bytes = b""
+    exit_code: int | None = None
+    signal_num: int | None = None
+    probes_captured: dict[str, bool] = {}
+    t_start = time.perf_counter()
+    proc = None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(run_dir),
+            env=clean_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            pass_fds=pass_fds,
+            preexec_fn=_preexec_init,
+        )
+        try:
+            os.close(status_w)
+        except OSError:
+            pass
+
+        try:
+            status_data = os.read(status_r, 1)
+            isolation_audit["landlock"] = (status_data == b"1")
+        except OSError:
+            isolation_audit["landlock"] = False
+        finally:
+            try:
+                os.close(status_r)
+            except OSError:
+                pass
+
+        try:
+            stdout_task = asyncio.create_task(_read_bounded_async_stream(proc.stdout))
+            stderr_task = asyncio.create_task(_read_bounded_async_stream(proc.stderr))
+            await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
+            stdout_bytes = await stdout_task
+            stderr_bytes = await stderr_task
+            exit_code = proc.returncode
+        except asyncio.TimeoutError:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except (asyncio.TimeoutError, OSError):
+                pass
+            exit_code = 124
+            signal_num = None
+            try:
+                stdout_bytes = await asyncio.wait_for(stdout_task, timeout=0.2)
+            except Exception:
+                stdout_bytes = b""
+            try:
+                stderr_bytes = await asyncio.wait_for(stderr_task, timeout=0.2)
+            except Exception:
+                stderr_bytes = b""
+    except Exception:
+        try:
+            os.close(status_r)
+        except OSError:
+            pass
+        if proc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except Exception:
+                pass
+        exit_code = 124
+        signal_num = None
+    finally:
+        wall_ms = int((time.perf_counter() - t_start) * 1000)
+
+        max_rss_kb = _read_cgroup_peak_kb(cg_path) if has_cg else 0
+        cg_events = _read_cgroup_memory_events(cg_path) if has_cg else {}
+        if cg_events:
+            isolation_audit["cgroup_events"] = cg_events
+            if cg_events.get("high", 0) > 0:
+                isolation_audit["memory_throttled"] = True
+
+        _cleanup_cgroup(cg_path)
+
+    if exit_code is not None and exit_code != 124:
+        if exit_code < 0:
+            signal_num = -exit_code
+        elif exit_code > 128:
+            signal_num = exit_code - 128
+
+    if exit_code != 124 and out_path.is_file():
+        try:
+            raw_out = json.loads(out_path.read_text(encoding="utf-8"))
+            raw_probes = raw_out.get("probes", {})
+            if isinstance(raw_probes, dict):
+                for k in spec.allowed_observables:
+                    if k in raw_probes and isinstance(raw_probes[k], bool):
+                        probes_captured[k] = raw_probes[k]
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    try:
+        if params_path.is_file():
+            params_path.unlink()
+        if out_path.is_file():
+            out_path.unlink()
+        run_dir.rmdir()
+    except OSError:
+        pass
+
+    stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
+    stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
+
+    return RawTrace(
+        exit_code=exit_code,
+        wall_ms=wall_ms,
+        probes=probes_captured,
+        stdout_hash=stdout_hash,
+        stderr_hash=stderr_hash,
+        signal=signal_num,
+        max_rss_kb=max_rss_kb,
+        isolation=isolation_audit,
+    )
+
+
 @runtime_checkable
 class CellBackend(Protocol):
     """Abstract boundary protocol for hermetic execution cell backends."""
 
     def execute(
+        self,
+        spec: HarnessSpec,
+        validated_params: dict[str, Any],
+        budget_ms: int,
+        workspace_root: Path,
+        harness_tree: Path,
+        pass_fds: tuple[int, ...] = (),
+        extra_env: Mapping[str, str] | None = None,
+        require_isolation: bool = False,
+    ) -> RawTrace:
+        ...
+
+    async def async_execute(
         self,
         spec: HarnessSpec,
         validated_params: dict[str, Any],
@@ -580,6 +845,28 @@ class HostLandlockBackend:
         require_isolation: bool = False,
     ) -> RawTrace:
         return _execute_host_landlock(
+            spec=spec,
+            validated_params=validated_params,
+            budget_ms=budget_ms,
+            workspace_root=workspace_root,
+            harness_tree=harness_tree,
+            pass_fds=pass_fds,
+            extra_env=extra_env,
+            require_isolation=require_isolation,
+        )
+
+    async def async_execute(
+        self,
+        spec: HarnessSpec,
+        validated_params: dict[str, Any],
+        budget_ms: int,
+        workspace_root: Path,
+        harness_tree: Path,
+        pass_fds: tuple[int, ...] = (),
+        extra_env: Mapping[str, str] | None = None,
+        require_isolation: bool = False,
+    ) -> RawTrace:
+        return await _async_execute_host_landlock(
             spec=spec,
             validated_params=validated_params,
             budget_ms=budget_ms,
@@ -776,6 +1063,34 @@ class DockerCellBackend:
         )
 
 
+
+    async def async_execute(
+        self,
+        spec: HarnessSpec,
+        validated_params: dict[str, Any],
+        budget_ms: int,
+        workspace_root: Path,
+        harness_tree: Path,
+        pass_fds: tuple[int, ...] = (),
+        extra_env: Mapping[str, str] | None = None,
+        require_isolation: bool = False,
+    ) -> RawTrace:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.execute(
+                spec=spec,
+                validated_params=validated_params,
+                budget_ms=budget_ms,
+                workspace_root=workspace_root,
+                harness_tree=harness_tree,
+                pass_fds=pass_fds,
+                extra_env=extra_env,
+                require_isolation=require_isolation,
+            )
+        )
+
+
 def execute_in_cell(
     spec: HarnessSpec,
     validated_params: dict[str, Any],
@@ -814,3 +1129,74 @@ def execute_in_cell(
         extra_env=extra_env,
         require_isolation=require_isolation,
     )
+
+
+async def async_execute_in_cell(
+    spec: HarnessSpec,
+    validated_params: dict[str, Any],
+    budget_ms: int,
+    workspace_root: Path,
+    harness_tree: Path,
+    pass_fds: tuple[int, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
+    require_isolation: bool = False,
+    backend: CellBackend | str | None = None,
+) -> RawTrace:
+    """Asynchronously dispatches execution to configured CellBackend."""
+    if backend is None:
+        env_backend = os.environ.get("WARDEN_BACKEND", "host").lower()
+        if env_backend == "docker":
+            selected_backend: CellBackend = DockerCellBackend()
+        else:
+            selected_backend = HostLandlockBackend()
+    elif isinstance(backend, str):
+        if backend.lower() == "docker":
+            selected_backend = DockerCellBackend()
+        elif backend.lower() in ("host", "landlock"):
+            selected_backend = HostLandlockBackend()
+        else:
+            raise ValueError(f"Unknown cell backend name: {backend}")
+    else:
+        selected_backend = backend
+
+    return await selected_backend.async_execute(
+        spec=spec,
+        validated_params=validated_params,
+        budget_ms=budget_ms,
+        workspace_root=workspace_root,
+        harness_tree=harness_tree,
+        pass_fds=pass_fds,
+        extra_env=extra_env,
+        require_isolation=require_isolation,
+    )
+
+
+async def async_execute_replicates(
+    spec: HarnessSpec,
+    validated_params: dict[str, Any],
+    budget_ms: int,
+    workspace_root: Path,
+    harness_tree: Path,
+    k: int = 3,
+    pass_fds: tuple[int, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
+    require_isolation: bool = False,
+    backend: CellBackend | str | None = None,
+) -> list[RawTrace]:
+    """Dispatches K cell replicates concurrently using true OS-level parallelism via asyncio.gather."""
+    tasks = [
+        async_execute_in_cell(
+            spec=spec,
+            validated_params=dict(validated_params),
+            budget_ms=budget_ms,
+            workspace_root=workspace_root,
+            harness_tree=harness_tree,
+            pass_fds=pass_fds,
+            extra_env=extra_env,
+            require_isolation=require_isolation,
+            backend=backend,
+        )
+        for _ in range(k)
+    ]
+    results = await asyncio.gather(*tasks)
+    return list(results)
