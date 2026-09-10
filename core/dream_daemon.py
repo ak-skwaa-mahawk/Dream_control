@@ -78,7 +78,9 @@ class DreamDaemon:
         decay_alpha: float = 0.5,
                  telemetry_sock: str | Path | None = None,
                  attestation_ledger_path: Path | None = None,
-                 attestation_key: str | bytes | None = None):
+                 attestation_key: str | bytes | None = None,
+        async_mode: bool = False,
+    ):
         self.catalog = catalog
         self.workspace_root = workspace_root
         self.seed_bank_path = seed_bank_path
@@ -109,7 +111,9 @@ class DreamDaemon:
             attestation_key.encode("utf-8") if isinstance(attestation_key, str)
             else attestation_key or os.environ.get("DREAM_ATTESTATION_KEY", "dream_control_master_key_2026").encode("utf-8")
         )
-        self._init_telemetry_socket()
+        self.async_mode = async_mode
+        if not self.async_mode:
+            self._init_telemetry_socket()
 
     def _init_telemetry_socket(self) -> None:
         if not self.telemetry_sock_path:
@@ -124,7 +128,13 @@ class DreamDaemon:
                 pass
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         sock.setblocking(False)
-        sock.bind(addr)
+        try:
+            sock.bind(addr)
+        except PermissionError as pe:
+            sock.close()
+            self.telemetry_sock = None
+            logger.warning(f"Telemetry socket bind failed due to permission denial ({pe}): {addr}")
+            return
         self.telemetry_sock = sock
         logger.info(f"Telemetry UNIX datagram listener bound at {self.telemetry_sock_path}")
 
@@ -628,6 +638,7 @@ if __name__ == "__main__":
         require_isolation=args.require_isolation,
         decay_mode=args.decay_mode,
         decay_alpha=args.decay_alpha,
+            async_mode=args.async_mode,
     )
 
     if args.async_mode:
