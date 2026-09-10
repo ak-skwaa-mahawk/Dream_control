@@ -217,6 +217,44 @@ class TestDreamControlPlane(unittest.TestCase):
         self.assertAlmostEqual(novelty, expected, places=4)
         self.assertLess(novelty, 0.05)
 
+    def test_evaluator_penalizes_throttled_traces(self):
+        from core.dream_evaluator import evaluate_traces
+        from core.dream_contract import RawTrace, Experiment
+
+        exp = Experiment(
+            dream_id="d_throttle_test",
+            harness_id="admission_gate_policy",
+            parameters={},
+            expected="intra_vires_confirmed",
+            unexpected=("panic",),
+            budget_ms=1000,
+        )
+        t_normal = RawTrace(
+            exit_code=0,
+            wall_ms=50,
+            probes={"intra_vires_confirmed": True},
+            stdout_hash="hash0",
+            stderr_hash="hash0",
+            signal=None,
+            max_rss_kb=1024,
+            isolation={"memory_throttled": False},
+        )
+        t_throttled = RawTrace(
+            exit_code=0,
+            wall_ms=50,
+            probes={"intra_vires_confirmed": True},
+            stdout_hash="hash0",
+            stderr_hash="hash0",
+            signal=None,
+            max_rss_kb=1024,
+            isolation={"memory_throttled": True},
+        )
+
+        v_norm = evaluate_traces(exp, [t_normal, t_normal, t_normal], novelty=1.0)
+        v_throt = evaluate_traces(exp, [t_normal, t_throttled, t_normal], novelty=1.0)
+
+        self.assertAlmostEqual(v_throt.score, v_norm.score * 0.5, places=3)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

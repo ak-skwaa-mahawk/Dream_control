@@ -152,6 +152,14 @@ def evaluate_traces(
     # 5. Deterministic Hard Consensus
     if reproduced:
         score = (1.0 if match else 0.0) + (2.0 if surprise else 0.0) + novelty
+        is_throttled = any(
+            t.isolation.get("memory_throttled", False)
+            or t.isolation.get("cgroup_events", {}).get("high", 0) > 0
+            for t in traces
+        )
+        if is_throttled:
+            score = round(score * 0.5, 4)
+            reasons.append("cgroup_memory_throttled")
         if score < tau:
             decision = "discard"
         else:
@@ -173,6 +181,14 @@ def evaluate_traces(
 
     if all_observed_expected and mean_jaccard >= consensus_threshold:
         score = ((1.0 if match else 0.0) + (2.0 if surprise else 0.0) + novelty) * mean_jaccard
+        is_throttled = any(
+            t.isolation.get("memory_throttled", False)
+            or t.isolation.get("cgroup_events", {}).get("high", 0) > 0
+            for t in traces
+        )
+        if is_throttled:
+            score = round(score * 0.5, 4)
+            reasons.append("cgroup_memory_throttled")
         if score < tau:
             decision = "discard"
         else:
