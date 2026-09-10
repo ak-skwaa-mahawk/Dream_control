@@ -7,3 +7,7 @@ data/
 run_workspace/
 data/
 run_workspace/
+audit_log.jsonl
+corpus.json
+seed_bank.json
+workspace/
