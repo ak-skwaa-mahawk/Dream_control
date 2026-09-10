@@ -234,5 +234,81 @@ class TestDreamDaemon(unittest.TestCase):
                 daemon.close()
 
 
+    def test_end_to_end_mcp_server_fuzzer_cycle_and_attestation(self):
+        import hashlib
+        import hmac
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.dream_contract import DEFAULT_CATALOG
+
+        def mock_llm(prompt: str, temp: float) -> str:
+            return json.dumps({
+                "dream_id": "dream_mcp_test",
+                "harness_id": "mcp_server_fuzzer",
+                "parameters": {
+                    "method": "resources/read",
+                    "uri": "file:///app/../../etc/passwd",
+                    "payload_size_kb": 10,
+                    "timeout_s": 0.5,
+                },
+                "expected": "statutory_veto_reached",
+                "unexpected": ["panic"],
+                "budget_ms": 1000,
+            })
+
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            ws_root = base / "ws"
+            sbank = base / "seeds.json"
+            sbank.write_text("[]", encoding="utf-8")
+            ledger = base / "attestation_ledger.jsonl"
+            secret_key = b"integration_test_secret_key"
+            repo_root = Path(__file__).resolve().parents[1]
+            harness_tree = repo_root / "harnesses"
+
+            daemon = DreamDaemon(
+                catalog={"mcp_server_fuzzer": DEFAULT_CATALOG["mcp_server_fuzzer"]},
+                workspace_root=ws_root,
+                seed_bank_path=sbank,
+                llm_callable=mock_llm,
+                harness_tree=harness_tree,
+                attestation_ledger_path=ledger,
+                attestation_key=secret_key,
+                k_replicates=3,
+                tau=2.0,
+            )
+            try:
+                with patch("core.dream_daemon.schedule_next_dream", return_value={
+                    "mode": "telemetry_perturbation",
+                    "seed_data": {"harness_id": "mcp_server_fuzzer", "raw_residue": "traversal_detected"},
+                }):
+                    res = daemon.run_cycle()
+
+                self.assertIsNotNone(res)
+                self.assertEqual(res["decision"], "promote_candidate")
+                self.assertEqual(res["k_replicates"], 3)
+
+                attestation = res.get("attestation")
+                self.assertIsNotNone(attestation)
+                self.assertEqual(attestation["payload"]["harness_id"], "mcp_server_fuzzer")
+                self.assertEqual(attestation["payload"]["decision"], "promote_candidate")
+
+                self.assertTrue(ledger.is_file())
+                lines = ledger.read_text(encoding="utf-8").strip().splitlines()
+                self.assertEqual(len(lines), 1)
+
+                entry = json.loads(lines[0])
+                canonical_bytes = json.dumps(entry["payload"], sort_keys=True, separators=(",", ":")).encode("utf-8")
+                expected_digest = hashlib.sha256(canonical_bytes).hexdigest()
+                self.assertEqual(entry["digest_sha256"], expected_digest)
+
+                expected_sig = hmac.new(secret_key, canonical_bytes, hashlib.sha256).hexdigest()
+                self.assertEqual(entry["signature_hmac_sha256"], expected_sig)
+            finally:
+                daemon.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
