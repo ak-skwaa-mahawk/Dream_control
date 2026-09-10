@@ -128,5 +128,29 @@ class TestDreamDaemon(unittest.TestCase):
             self.assertTrue(flaky_bank.is_file())
             self.assertFalse(seed_bank.is_file())
 
+
+    def test_hyperparameter_tuning_honored(self):
+        catalog = {self.spec.harness_id: self.spec} if hasattr(self, "spec") else getattr(self, "catalog", {})
+        workspace = getattr(self, "workspace_root", getattr(self, "workspace", Path("/tmp")))
+        seed_bank = getattr(self, "seed_bank_path", getattr(self, "seed_bank", Path("/tmp/seed.json")))
+        harness_tree = getattr(self, "harness_tree", Path("/tmp/harnesses"))
+        daemon = DreamDaemon(
+            catalog=catalog,
+            workspace_root=workspace,
+            seed_bank_path=seed_bank,
+            llm_callable=lambda prompt, temp: "{}",
+            harness_tree=harness_tree,
+            k_replicates=5,
+            tau=3.5,
+            consensus_threshold=0.90,
+            phase1_temp=1.3,
+            phase2_temp=0.1,
+        )
+        self.assertEqual(daemon.k_replicates, 5)
+        self.assertEqual(daemon.tau, 3.5)
+        self.assertEqual(daemon.consensus_threshold, 0.90)
+        self.assertEqual(daemon.phase1_temp, 1.3)
+        self.assertEqual(daemon.phase2_temp, 0.1)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -76,11 +76,13 @@ class RemoteHttpBackend:
         endpoint_url: str,
         api_key: str | None = None,
         model: str = "default-fuzz-generator",
+        temperature: float = 0.2,
         extra_headers: Mapping[str, str] | None = None,
     ):
         self.endpoint_url = endpoint_url
         self.api_key = api_key
         self.model = model
+        self.temperature = float(temperature)
         self.extra_headers = dict(extra_headers or {})
 
     def generate(
@@ -97,7 +99,7 @@ class RemoteHttpBackend:
                 {"role": "user", "content": prompt},
             ],
             "response_format": {"type": "json_object"},
-            "temperature": 0.2,
+            "temperature": self.temperature,
         }
 
         body_bytes = json.dumps(payload).encode("utf-8")
@@ -209,17 +211,19 @@ def generate_experiment(
     seed: dict[str, Any],
     catalog: Mapping[str, HarnessSpec],
     llm_fn: Callable[[str, float], str],
+    phase1_temp: float = 1.1,
+    phase2_temp: float = 0.2,
 ) -> Experiment:
     """Two-phase generation entry point preserving backwards compatibility with daemon and existing tests."""
     phase1_prompt = f"Analyze seed anomaly and propose speculative scenario:\n{seed.get('raw_residue', '')}"
-    _ = llm_fn(phase1_prompt, 1.2)
+    _ = llm_fn(phase1_prompt, phase1_temp)
 
     harness_keys = list(catalog.keys())
     phase2_prompt = (
         f"Synthesize structured JSON fuzzer experiment for catalog targets: {harness_keys}.\n"
         "Must adhere to target schema types and bounds."
     )
-    raw_output = llm_fn(phase2_prompt, 0.2)
+    raw_output = llm_fn(phase2_prompt, phase2_temp)
     cleaned = extract_markdown_json(raw_output)
 
     try:

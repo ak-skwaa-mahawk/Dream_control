@@ -57,6 +57,10 @@ class DreamDaemon:
         charter_path: Path | None = None,
         k_replicates: int = DEFAULT_K_REPLICATES,
         require_isolation: bool = False,
+        tau: float = 2.0,
+        consensus_threshold: float = 0.67,
+        phase1_temp: float = 1.1,
+        phase2_temp: float = 0.2,
     ):
         self.catalog = catalog
         self.workspace_root = workspace_root
@@ -70,6 +74,10 @@ class DreamDaemon:
         self.charter_path = charter_path
         self.k_replicates = max(1, k_replicates)
         self.require_isolation = require_isolation
+        self.tau = float(tau)
+        self.consensus_threshold = float(consensus_threshold)
+        self.phase1_temp = float(phase1_temp)
+        self.phase2_temp = float(phase2_temp)
 
         self.corpus = self._load_corpus()
         self.promoted_seeds: list[dict[str, Any]] = self._load_json_list(self.seed_bank_path)
@@ -221,3 +229,23 @@ class DreamDaemon:
             "trace": traces[0],
             "k_replicates": self.k_replicates,
         }
+
+
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="Dream Control Autonomous Fuzzing Daemon")
+    parser.add_argument("--k-replicates", type=int, default=3, help="Replicates per candidate (K >= 1)")
+    parser.add_argument("--tau", type=float, default=2.0, help="Verdict score threshold for promotion")
+    parser.add_argument("--consensus-threshold", type=float, default=0.67, help="Pairwise Jaccard threshold floor (0.0 - 1.0)")
+    parser.add_argument("--temp-diverge", type=float, default=1.1, help="Phase 1 speculative divergence temperature")
+    parser.add_argument("--temp-converge", type=float, default=0.2, help="Phase 2 structured schema convergence temperature")
+    parser.add_argument("--require-isolation", action="store_true", help="Enforce hermetic sandbox isolation")
+    parser.add_argument("--workspace", type=Path, default=Path("/tmp/dream_workspace"), help="Workspace root")
+    parser.add_argument("--seed-bank", type=Path, default=Path("seed_bank.json"), help="Seed bank path")
+    parser.add_argument("--harness-tree", type=Path, default=Path("harnesses"), help="Harnesses directory")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    print(f"Daemon configured: K={args.k_replicates}, tau={args.tau}, Jaccard_floor={args.consensus_threshold}, T1={args.temp_diverge}, T2={args.temp_converge}")
