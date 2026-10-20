@@ -1,0 +1,7 @@
+{
+  "audit_target": "<ENTITY_OR_CONTRACT_ID>",
+  "discrepancy_amount_usd": 0.00,
+  "discrepancy_category": "procurement_fraud|double_spend|circular_flow",
+  "evidence_merkle_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "timestamp_utc": "2026-10-20T19:35:00Z"
+}
