@@ -3,9 +3,9 @@
   "discrepancy_amount_usd": 0.00,
   "discrepancy_category": "procurement_fraud|double_spend|circular_flow",
   "evidence_merkle_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "payout_addresses": {
-    "solana": "2ChMGz6MeNoEgBuGj7aXYw1Mbc3DSzkZgwNwg1xGD1r9",
-    "evm_relayer": "0xC48aC4Fa8CC06078996Fe891333B325Ea234868D"
+  "settlement_targets": {
+    "evm_target": "0xb09d703e8dc8f4e8bb0ec5d6fb40d96c23febf6e",
+    "solana_vault": "2ChMGz6MeNoEgBuGj7aXYw1Mbc3DSzkZgwNwg1xGD1r9"
   },
-  "timestamp_utc": "2026-10-20T20:00:00Z"
+  "timestamp_utc": "2026-10-20T20:06:00Z"
 }
