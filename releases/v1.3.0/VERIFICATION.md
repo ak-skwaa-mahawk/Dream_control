@@ -434,3 +434,13 @@ text
 - **Lyapunov Exponent**: -7.683965
 - **Beneficiary Vault (Solana)**: `2ChMGz6MeNoEgBuGj7aXYw1Mbc3DSzkZgwNwg1xGD1r9`
 - **Proof System**: Guest Circuit ZK-STARK (64-byte public journal)
+
+### Sequence #66 State Settlement (Live Sepolia — Dual-Chain Routed)
+- **Status**: Verified & Confirmed On-Chain
+- **Block Height**: 11957616
+- **Transaction Hash**: `0x7d0e3df2e1a306a6bd0a43f9bcb112068b783ea1c50562e8b91af48b20b0332c`
+- **Verifier Contract**: `0xb09d703e8dc8f4e8bb0ec5d6fb40d96c23febf6e`
+- **Coordinates**: Phase X = 1.287535, Phase Y = 0.150206
+- **Lyapunov Exponent**: -7.683965
+- **Beneficiary Vault (Solana)**: `2ChMGz6MeNoEgBuGj7aXYw1Mbc3DSzkZgwNwg1xGD1r9`
+- **Proof System**: Guest Circuit ZK-STARK (64-byte public journal)
