@@ -26,3 +26,4 @@ faucet_poller.pid
 releases/**/*.bundle
 releases/**/*.gz
 releases/**/*.raw
+witness_input.json
