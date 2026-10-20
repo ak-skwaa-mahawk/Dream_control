@@ -1,0 +1,14 @@
+procedure ToolExecRPC {
+    /*
+     * Dispatches tool invocation across capability boundary.
+     * in: tool identifier and validated argument buffer
+     * out: canonical status code and tool result output
+     */
+    uint16_t execute(
+        in uint16_t tool_id,
+        in uint16_t arg_len,
+        in uint8_t args[992],
+        out uint16_t result_len,
+        out uint8_t result[1008]
+    );
+};

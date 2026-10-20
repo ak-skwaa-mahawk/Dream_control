@@ -1,0 +1,28 @@
+# Binary images & rootfs assets
+*.raw
+*.tar.gz
+*.cpio.gz
+*.bundle
+*.elf
+*.bin
+vmlinuz*
+
+# Build artifacts & compiled objects
+*.o
+*.so
+*.pyc
+__pycache__/
+
+# Local runtime & IPC queues
+node_modules/
+relayer.log
+relayer.pid
+state_queue.pipe
+faucet_poller.log
+faucet_poller.pid
+.env
+
+# Ignored release bundles
+releases/**/*.bundle
+releases/**/*.gz
+releases/**/*.raw

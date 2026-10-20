@@ -1,0 +1,23 @@
+/ {
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        /* 4KB Sovereign ToolGate Dataport */
+        sovr_gate_buf: reserved-memory@48000000 {
+            compatible = "shared-dma-pool";
+            reg = <0x00000000 0x48000000 0x00000000 0x00001000>;
+            no-map;
+        };
+
+        /* Doorbell interrupts routed to Linux GIC */
+        sovr_toolgate_dev@48000000 {
+            compatible = "sovereign,sel4-toolgate-uio";
+            reg = <0x00000000 0x48000000 0x00000000 0x00001000>;
+            interrupt-parent = <&gic>;
+            interrupts = <0 68 4>; /* SPI interrupt 68 (VerdictReady notification) */
+            memory-region = <&sovr_gate_buf>;
+            status = "okay";
+        };
+    };
+};

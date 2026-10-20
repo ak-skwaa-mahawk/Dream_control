@@ -1,0 +1,1 @@
+echo "Exit code: $?"rm -rf /tmp/ci_test

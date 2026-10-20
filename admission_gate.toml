@@ -1,0 +1,49 @@
+[policy]
+require_confirm = false
+blocked_patterns = [
+    "rm -rf /",
+    ":(){ :|:& };:",
+    "/dev/sd",
+    "> /dev/null"
+]
+
+[logging]
+log_file = "audit_log.jsonl"
+
+[process]
+timeout_seconds = 30.0
+scrub_env = true
+env_allow = ["PATH", "LANG", "LC_ALL"]
+
+[filesystem]
+read_roots = [
+    "./workspace",
+    "/data/data/com.termux/files/usr/bin"
+]
+write_roots = [
+    "./workspace/firecrawl_data",
+    "./workspace"
+]
+protected_paths = [
+    "/etc",
+    "/boot",
+    "/sys",
+    "/dev",
+    "/proc"
+]
+
+[exec]
+allow = [
+    "echo",
+    "cat",
+    "ls",
+    "mkdir",
+    "python3",
+    "sha256sum"
+]
+deny = [
+    "rm",
+    "dd",
+    "chmod",
+    "chown"
+]

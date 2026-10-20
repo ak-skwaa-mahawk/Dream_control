@@ -1,0 +1,69 @@
+name: Sovereign Appliance CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify-appliance:
+    name: Build, Smoke Test & CAmkES Verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Locate Appliance Workspace
+        id: locate
+        run: |
+          if [ -f "./gate_dataport_reader.c" ]; then
+            echo "appliance_dir=." >> "$GITHUB_OUTPUT"
+          elif [ -f "./sovereign-appliance/gate_dataport_reader.c" ]; then
+            echo "appliance_dir=./sovereign-appliance" >> "$GITHUB_OUTPUT"
+          else
+            echo "[-] Error: gate_dataport_reader.c not found" >&2
+            exit 1
+          fi
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm \
+            gcc \
+            clang \
+            libssl-dev \
+            python3 \
+            python3-pip \
+            python3-cryptography \
+            python3-toml \
+            gzip \
+            cpio
+
+      - name: Compile CAmkES Dataport Reader
+        working-directory: ${{ steps.locate.outputs.appliance_dir }}
+        run: |
+          clang -Wall -Wextra -O2 gate_dataport_reader.c -lcrypto -o gate_dataport_reader
+
+      - name: Run Host-Side Test Harness & Generate Quorum Approval
+        working-directory: ${{ steps.locate.outputs.appliance_dir }}
+        run: |
+          mkdir -p workspace/firecrawl_data workspace/audit workspace/notary_keys
+          python3 test_handshake_harness.py
+
+      - name: Cryptographically Verify Approval Vector with C Reader
+        working-directory: ${{ steps.locate.outputs.appliance_dir }}
+        run: |
+          ./gate_dataport_reader ./workspace/harness_approval.bin ./workspace/notary_keys
+
+      - name: Execute QEMU Smoke Test (if kernel & initramfs present)
+        working-directory: ${{ steps.locate.outputs.appliance_dir }}
+        run: |
+          if [ -f "./vmlinuz-virt" ] && [ -f "./sovr-initramfs-aarch64.cpio.gz" ]; then
+            chmod +x test_appliance_smoke.sh
+            ./test_appliance_smoke.sh
+          else
+            echo "[*] Large image binaries not in VCS workspace. In-guest QEMU smoke test skipped in fast CI."
+          fi

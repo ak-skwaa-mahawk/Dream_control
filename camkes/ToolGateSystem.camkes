@@ -1,0 +1,69 @@
+import <std_connector.camkes>;
+import <interfaces/ToolExecRPC.idl4>;
+
+/* Privileged backend holding raw capabilities */
+component ToolExecutor {
+    provides ToolExecRPC exec;
+}
+
+/* Formal admission gate */
+component ToolGate {
+    dataport Buf(4096) guest_buf;
+    consumes ProposalReady proposal_ready;
+    emits VerdictReady verdict_ready;
+    uses ToolExecRPC exec;
+}
+
+/* seL4 ARM Virtual Machine Monitor */
+component VMM {
+    dataport Buf(4096) guest_gate_buf;
+    emits ProposalReady guest_proposal_ready;
+    consumes VerdictReady guest_verdict_ready;
+    include <vmm/vmm.h>;
+}
+
+assembly {
+    composition {
+        component VMM vmm;
+        component ToolGate gate;
+        component ToolExecutor executor;
+
+        /* Shared 4KB Dataport between Linux VM and native seL4 Gate */
+        connection seL4SharedData shm(
+            from vmm.guest_gate_buf,
+            to gate.guest_buf
+        );
+
+        /* Guest -> Gate signal */
+        connection seL4Notification notify_prop(
+            from vmm.guest_proposal_ready,
+            to gate.proposal_ready
+        );
+
+        /* Gate -> Guest verdict/result notification */
+        connection seL4Notification notify_verdict(
+            from gate.verdict_ready,
+            to vmm.guest_verdict_ready
+        );
+
+        /* Gate -> Privileged Executor RPC */
+        connection seL4RPCCall rpc_exec(
+            from gate.exec,
+            to executor.exec
+        );
+    }
+
+    configuration {
+        /* Priority isolation */
+        gate.priority = 200;
+        executor.priority = 190;
+        vmm.priority = 100;
+
+        /* Map dataport into the guest VM physical memory map at 0x48000000 */
+        vmm.guest_gate_buf_paddr = 0x48000000;
+        vmm.guest_gate_buf_size  = 0x1000;
+
+        /* Assign GIC SPI IRQ line for verdict delivery */
+        vmm.guest_verdict_ready_irq = 100; /* GIC SPI 68 (100 - 32) */
+    }
+}
