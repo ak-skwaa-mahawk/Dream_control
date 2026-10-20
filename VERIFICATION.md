@@ -230,3 +230,12 @@ text
 - **Active Memory Lineage**: `sovr-001`, `north-star-001`
 - **Proof Type**: ZK-STARK (64-byte succinct footprint)
 - **Status**: Confirmed
+
+### Sequence #44 State Settlement (Live Sepolia)
+- **Status**: Verified & Confirmed On-Chain
+- **Block Height**: 11956591
+- **Transaction Hash**: `0x6a39b9409d840a8d535696e69f2fbc2a0967a56b1b3071789e30dfc4116a56f5`
+- **Verifier Contract**: `0xb09d703e8dc8f4e8bb0ec5d6fb40d96c23febf6e`
+- **Coordinates**: Phase X = 1.292748, Phase Y = 0.155354
+- **Lyapunov Exponent**: -7.683965
+- **Proof System**: Guest Circuit ZK-STARK (64-byte public journal)
