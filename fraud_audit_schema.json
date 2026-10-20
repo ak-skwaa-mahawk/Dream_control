@@ -3,5 +3,9 @@
   "discrepancy_amount_usd": 0.00,
   "discrepancy_category": "procurement_fraud|double_spend|circular_flow",
   "evidence_merkle_root": "0x0000000000000000000000000000000000000000000000000000000000000000",
-  "timestamp_utc": "2026-10-20T19:35:00Z"
+  "payout_addresses": {
+    "solana": "2ChMGz6MeNoEgBuGj7aXYw1Mbc3DSzkZgwNwg1xGD1r9",
+    "evm_relayer": "0xC48aC4Fa8CC06078996Fe891333B325Ea234868D"
+  },
+  "timestamp_utc": "2026-10-20T20:00:00Z"
 }

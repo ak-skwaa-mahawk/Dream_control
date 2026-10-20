@@ -385,3 +385,12 @@ text
 - **Coordinates**: Phase X = 1.288957, Phase Y = 0.151610
 - **Lyapunov Exponent**: -7.683965
 - **Proof System**: Guest Circuit ZK-STARK (64-byte public journal)
+
+### Sequence #61 State Settlement (Live Sepolia)
+- **Status**: Verified & Confirmed On-Chain
+- **Block Height**: 11957539
+- **Transaction Hash**: `0x01aad165dc90e072fd2e6d8c7fb7c6bb7bc032e2e4faf52b285e74b30ea43517`
+- **Verifier Contract**: `0xb09d703e8dc8f4e8bb0ec5d6fb40d96c23febf6e`
+- **Coordinates**: Phase X = 1.288720, Phase Y = 0.151376
+- **Lyapunov Exponent**: -7.683965
+- **Proof System**: Guest Circuit ZK-STARK (64-byte public journal)
